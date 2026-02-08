@@ -2,37 +2,36 @@ import time
 import requests
 import os
 from solana.rpc.api import Client
-# --- NEW LIGHTWEIGHT DATABASE IMPORT ---
 from postgrest import SyncPostgrestClient
-# ----------------------------------------
 from dotenv import load_dotenv
 
-# --- ⚙️ SETTINGS ---
 load_dotenv()
+
+# --- SETTINGS ---
 WHALE_THRESHOLD = 1000  
 ALCHEMY_URL = os.getenv("ALCHEMY_URL", "https://api.mainnet-beta.solana.com")
-
-# --- 🔑 CREDENTIALS ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# --- INITIALIZE DATABASE DIRECTLY ---
-# We point directly to the REST API of your Supabase instance
+# --- GLOBAL PRICE MEMORY ---
+last_known_price = 105.0 # Starting default
+
 db_url = f"{SUPABASE_URL}/rest/v1"
-headers = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}"
-}
+headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
 db = SyncPostgrestClient(db_url, headers=headers)
 
 def get_sol_price():
+    global last_known_price
     try:
         res = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", timeout=5).json()
-        return float(res['solana']['usd'])
+        price = float(res['solana']['usd'])
+        last_known_price = price # Update memory
+        return price
     except:
-        return 105.0 
+        print(f"⚠️ Price Oracle busy. Using memory: ${last_known_price}")
+        return last_known_price # Return the last good price we saw
 
 def send_alert(msg):
     if not TELEGRAM_BOT_TOKEN: return
@@ -70,17 +69,22 @@ def main():
                         
                         if diff >= WHALE_THRESHOLD:
                             sig = str(tx.transaction.signatures[0])
+                            
+                            # Now always returns a valid number (Live or Memory)
                             price = get_sol_price()
                             usd_val = diff * price
                             
                             print(f"🐋 WHALE: {diff:.2f} SOL (${usd_val:,.2f})", flush=True)
                             
-                            # --- MODIFIED INSERT LOGIC ---
+                            # Sync to DB
                             data = {"sol_amount": diff, "usd_value": usd_val, "signature": sig}
                             db.table("whale_alerts").insert(data).execute()
-                            # -----------------------------
                             
-                            msg = f"🚨 <b>WHALE DETECTED</b>\n💰 {diff:,.2f} SOL\n🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a>"
+                            # Telegram Alert
+                            msg = (f"🚨 <b>WHALE DETECTED</b>\n\n"
+                                   f"💰 <b>Amount:</b> {diff:,.2f} SOL\n"
+                                   f"💵 <b>Est. Value:</b> ${usd_val:,.2f} USD\n"
+                                   f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan Explorer</a>")
                             send_alert(msg)
                     except:
                         continue 
