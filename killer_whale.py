@@ -2,9 +2,9 @@ import time
 import requests
 import os
 from solana.rpc.api import Client
-# --- MODIFIED IMPORT TO BYPASS WEBSOCKETS ---
-from supabase.client import create_client, ClientOptions
-# --------------------------------------------
+# --- NEW LIGHTWEIGHT DATABASE IMPORT ---
+from postgrest import SyncPostgrestClient
+# ----------------------------------------
 from dotenv import load_dotenv
 
 # --- ⚙️ SETTINGS ---
@@ -13,26 +13,19 @@ WHALE_THRESHOLD = 1000
 ALCHEMY_URL = os.getenv("ALCHEMY_URL", "https://api.mainnet-beta.solana.com")
 
 # --- 🔑 CREDENTIALS ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# --- INITIALIZE SUPABASE MANUALLY ---
-if not SUPABASE_URL or not SUPABASE_KEY:
-    print("❌ ERROR: Supabase credentials missing!")
-    exit(1)
-
-try:
-    # We disable realtime to avoid the 'websockets.asyncio' dependency error
-    supabase = create_client(
-        SUPABASE_URL, 
-        SUPABASE_KEY,
-        options=ClientOptions(postgrest_client_timeout=10)
-    )
-except Exception as e:
-    print(f"FATAL: Supabase Init Failed: {e}")
-    exit(1)
+# --- INITIALIZE DATABASE DIRECTLY ---
+# We point directly to the REST API of your Supabase instance
+db_url = f"{SUPABASE_URL}/rest/v1"
+headers = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}"
+}
+db = SyncPostgrestClient(db_url, headers=headers)
 
 def get_sol_price():
     try:
@@ -52,7 +45,6 @@ def send_alert(msg):
 def main():
     print(f"🚀 ENGINE STARTING: Threshold {WHALE_THRESHOLD} SOL", flush=True)
     client = Client(ALCHEMY_URL, timeout=15)
-    
     last_processed_slot = 0
 
     while True:
@@ -83,8 +75,10 @@ def main():
                             
                             print(f"🐋 WHALE: {diff:.2f} SOL (${usd_val:,.2f})", flush=True)
                             
+                            # --- MODIFIED INSERT LOGIC ---
                             data = {"sol_amount": diff, "usd_value": usd_val, "signature": sig}
-                            supabase.table("whale_alerts").insert(data).execute()
+                            db.table("whale_alerts").insert(data).execute()
+                            # -----------------------------
                             
                             msg = f"🚨 <b>WHALE DETECTED</b>\n💰 {diff:,.2f} SOL\n🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a>"
                             send_alert(msg)
