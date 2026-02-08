@@ -47,7 +47,6 @@ solana_client = Client(ALCHEMY_URL)
 # --- CORE FUNCTIONS ---
 
 def get_sol_price():
-    """Triple-redundant price oracle to prevent $0.00 values."""
     global last_known_price
     try:
         res = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", timeout=3).json()
@@ -59,28 +58,14 @@ def get_sol_price():
         last_known_price = float(res['price'])
         return last_known_price
     except: pass
-    try:
-        res = requests.get("https://price.jup.ag/v4/price?ids=SOL", timeout=3).json()
-        last_known_price = float(res['data']['SOL']['price'])
-        return last_known_price
-    except:
-        return last_known_price
+    return last_known_price
 
 def check_blacklisted_dev(mint):
-    """Checks if the token creator/mint authority is in the blacklist."""
     try:
-        # Fetching the Mint Authority from the account info
-        resp = solana_client.get_account_info(mint).value
-        if not resp: return "Unknown", False
-        
-        # In a real scenario, you'd decode the data to get the Mint Authority address.
-        # For this PoC, we use the wallet that first initialized the mint if available.
-        creator_address = "Check_Manual" # Placeholder for parsed address
-        
-        check = db.table("blacklisted_devs").select("*").eq("wallet_address", creator_address).execute()
-        return creator_address, len(check.data) > 0
-    except:
-        return "Unknown", False
+        # Simplified: Check if token mint or common creator patterns are blacklisted
+        check = db.table("blacklisted_devs").select("*").eq("wallet_address", mint).execute()
+        return mint, len(check.data) > 0
+    except: return None, False
 
 def check_token_safety(mint):
     try:
@@ -90,8 +75,7 @@ def check_token_safety(mint):
         if score < 600: return "✅ SAFE", "Safe"
         elif score < 2000: return "⚠️ MODERATE", "Risky"
         else: return "🚨 HIGH DANGER", "Danger"
-    except:
-        return "❓ Unknown", "Unknown"
+    except: return "❓ Unknown", "Unknown"
 
 def get_token_name(mint):
     try:
@@ -119,7 +103,7 @@ def send_alert(msg, is_loud=False):
 
 def main():
     global last_pulse_time
-    print(f"🚀 ENGINE STARTING: WHALE INTEL V4.3 (Guardian Edition)", flush=True)
+    print(f"🚀 ENGINE STARTING: WHALE INTEL V4.3 (Alpha Narrative Edition)", flush=True)
     last_processed_slot = 0
 
     while True:
@@ -139,8 +123,11 @@ def main():
                     sol_diff = abs(tx.meta.pre_balances[0] - tx.meta.post_balances[0]) / 10**9
                     usd_val = sol_diff * price
 
-                    # --- SWAP DETECTION ---
+                    # --- DETECTOR LOGIC ---
+                    is_meme_alert = False
                     instructions = tx.transaction.message.instructions
+                    
+                    # Check for Swaps First (Meme Coin Priority)
                     for instr in instructions:
                         prog_id = str(instr.get('programId', ''))
                         if prog_id in [JUPITER_PROGRAM_ID, RAYDIUM_PROGRAM_ID]:
@@ -153,33 +140,45 @@ def main():
                                         user_wallet = tx.transaction.message.account_keys[0]['pubkey']
                                         w_label, _ = get_wallet_profile(user_wallet)
                                         
-                                        # FLAG BLACKLIST, SMART MONEY & SAFETY
                                         _, is_blacklisted = check_blacklisted_dev(mint)
                                         is_smart = "🔥 SMART MONEY" in w_label or "🤖" in w_label
                                         safety_label, safety_status = check_token_safety(mint)
                                         
-                                        if is_blacklisted:
-                                            title = "❌ <b>BLACKLISTED DEV DETECTED</b> ❌"
-                                            status_emoji = "🔴"
-                                        elif is_smart:
-                                            title = "🚨 <b>SMART MONEY ENTRY</b> 🚨"
-                                            status_emoji = "🔥"
-                                        else:
-                                            title = "🦄 <b>MEME COIN ALPHA</b>"
-                                            status_emoji = "💎"
-
+                                        title = "🚨 <b>SMART MONEY ENTRY</b> 🚨" if is_smart else "🦄 <b>MEME COIN ALPHA</b>"
+                                        if is_blacklisted: title = "❌ <b>BLACKLISTED DEV DETECTED</b> ❌"
+                                        
                                         token_symbol = get_token_name(mint)
                                         
-                                        msg = (f"{title}\n\n"
-                                               f"{status_emoji} <b>Token:</b> {token_symbol}\n"
+                                        msg = (f"{title}\n"
+                                               f"━━━━━━━━━━━━━━━━━━\n"
+                                               f"💎 <b>Token:</b> {token_symbol}\n"
                                                f"🛡️ <b>Security:</b> {safety_label}\n"
                                                f"👤 <b>Trader:</b> {w_label}\n"
-                                               f"💰 <b>Size:</b> ${usd_val:,.2f} USD\n\n"
-                                               f"🔍 <a href='https://rugcheck.xyz/tokens/{mint}'>Security Audit</a>\n"
-                                               f"📊 <a href='https://birdeye.so/token/{mint}?chain=solana'>Trader PnL</a>")
+                                               f"💰 <b>Size:</b> ${usd_val:,.2f} USD ({sol_diff:,.1f} SOL)\n"
+                                               f"━━━━━━━━━━━━━━━━━━\n"
+                                               f"📊 <a href='https://birdeye.so/token/{mint}?chain=solana'>Check Trader PnL</a>\n"
+                                               f"📈 <a href='https://dexscreener.com/solana/{mint}'>View Live Chart</a>")
                                         
                                         send_alert(msg, is_loud=(is_smart or is_blacklisted or (sol_diff >= LOUD_THRESHOLD and safety_status != "Danger")))
-                                        break 
+                                        is_meme_alert = True
+                                        break
+                    
+                    # Fallback for Generic Whale Transfers (Macro Moves)
+                    if not is_meme_alert and sol_diff >= WHALE_THRESHOLD:
+                        sender = tx.transaction.message.account_keys[0]['pubkey']
+                        receiver = tx.transaction.message.account_keys[1]['pubkey']
+                        s_label, _ = get_wallet_profile(sender)
+                        r_label, _ = get_wallet_profile(receiver)
+                        
+                        msg = (f"🐋 <b>WHALE SOL TRANSFER</b>\n"
+                               f"━━━━━━━━━━━━━━━━━━\n"
+                               f"💰 <b>Amount:</b> {sol_diff:,.0f} SOL (${usd_val:,.2f})\n"
+                               f"📤 <b>From:</b> {s_label}\n"
+                               f"📥 <b>To:</b> {r_label}\n"
+                               f"━━━━━━━━━━━━━━━━━━\n"
+                               f"🔗 <a href='https://solscan.io/tx/{tx.transaction.signatures[0]}'>View on Solscan</a>")
+                        
+                        send_alert(msg, is_loud=(sol_diff >= LOUD_THRESHOLD))
 
             last_processed_slot = current_slot
             time.sleep(1)
