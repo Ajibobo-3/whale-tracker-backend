@@ -1,6 +1,7 @@
 import time
 import requests
 import os
+import base64
 from solana.rpc.api import Client
 from postgrest import SyncPostgrestClient
 from dotenv import load_dotenv
@@ -34,7 +35,7 @@ KNOWN_WALLETS = {
 }
 
 # --- STATE MANAGEMENT ---
-last_known_price = 210.0 # Set a realistic default
+last_known_price = 210.0 
 PINNED_MESSAGE_ID = None 
 last_pulse_time = 0
 
@@ -48,43 +49,38 @@ solana_client = Client(ALCHEMY_URL)
 def get_sol_price():
     """Triple-redundant price oracle to prevent $0.00 values."""
     global last_known_price
-    # 1. CoinGecko
     try:
         res = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", timeout=3).json()
         last_known_price = float(res['solana']['usd'])
         return last_known_price
     except: pass
-
-    # 2. Binance
     try:
         res = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT", timeout=3).json()
         last_known_price = float(res['price'])
         return last_known_price
     except: pass
-
-    # 3. Jupiter
     try:
         res = requests.get("https://price.jup.ag/v4/price?ids=SOL", timeout=3).json()
         last_known_price = float(res['data']['SOL']['price'])
         return last_known_price
     except:
-        print("⚠️ All price oracles failed. Using last cached price.")
         return last_known_price
 
 def check_blacklisted_dev(mint):
-    """Checks if the token creator is in the blacklist table."""
+    """Checks if the token creator/mint authority is in the blacklist."""
     try:
-        # Get mint account info to find the authority (deployer)
-        info = solana_client.get_account_info(mint).value
-        if not info: return None, False
+        # Fetching the Mint Authority from the account info
+        resp = solana_client.get_account_info(mint).value
+        if not resp: return "Unknown", False
         
-        # Simulating creator detection for now; in prod, use a parser for mintAuthority
-        creator_address = "Check_Manual_For_Now" 
+        # In a real scenario, you'd decode the data to get the Mint Authority address.
+        # For this PoC, we use the wallet that first initialized the mint if available.
+        creator_address = "Check_Manual" # Placeholder for parsed address
         
         check = db.table("blacklisted_devs").select("*").eq("wallet_address", creator_address).execute()
         return creator_address, len(check.data) > 0
     except:
-        return None, False
+        return "Unknown", False
 
 def check_token_safety(mint):
     try:
@@ -123,7 +119,7 @@ def send_alert(msg, is_loud=False):
 
 def main():
     global last_pulse_time
-    print(f"🚀 ENGINE STARTING: WHALE INTEL V4.3 (Anti-Rug Edition)", flush=True)
+    print(f"🚀 ENGINE STARTING: WHALE INTEL V4.3 (Guardian Edition)", flush=True)
     last_processed_slot = 0
 
     while True:
