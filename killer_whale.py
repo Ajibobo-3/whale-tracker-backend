@@ -9,7 +9,7 @@ load_dotenv()
 
 # --- SETTINGS ---
 WHALE_THRESHOLD = 1000  
-LOUD_THRESHOLD = 2500  # Pings phone only if >= 2500 SOL
+LOUD_THRESHOLD = 2500  
 ALCHEMY_URL = os.getenv("ALCHEMY_URL", "https://api.mainnet-beta.solana.com")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -83,12 +83,20 @@ def update_pulse_report():
     """Calculates 24h flows and updates the pinned Telegram message."""
     global PINNED_MESSAGE_ID
     try:
-        # Fetch alerts from Supabase for the last 24 hours
+        # 1. Fetch alerts from Supabase
         res = db.table("whale_alerts").select("*").execute()
-        # Filter for last 24h manually if your SQL doesn't support the interval string directly
-        day_ago = time.time() - (24 * 60 * 60)
-        alerts = [a for a in res.data if a.get('created_at_unix', 0) > day_ago] # Assuming you save a unix timestamp
         
+        # 2. THE FIX: Filter out rows where created_at_unix is None (old data)
+        day_ago = time.time() - (24 * 60 * 60)
+        alerts = [
+            a for a in res.data 
+            if a.get('created_at_unix') is not None and float(a['created_at_unix']) > day_ago
+        ]
+        
+        if not alerts:
+            print("🕒 Pulse Report: No valid whale data found for the last 24h yet.")
+            return
+
         inflow = sum(a['sol_amount'] for a in alerts if "BEARISH" in a.get('sentiment', ''))
         outflow = sum(a['sol_amount'] for a in alerts if "BULLISH" in a.get('sentiment', ''))
         net_flow = outflow - inflow
