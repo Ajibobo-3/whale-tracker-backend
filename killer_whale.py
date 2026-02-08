@@ -10,28 +10,35 @@ load_dotenv()
 # --- SETTINGS ---
 WHALE_THRESHOLD = 1000  
 LOUD_THRESHOLD = 2500  
+TOKEN_BUY_THRESHOLD_USD = 5000 
+
 ALCHEMY_URL = os.getenv("ALCHEMY_URL", "https://api.mainnet-beta.solana.com")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+# --- DEX PROGRAM IDs ---
+JUPITER_PROGRAM_ID = "JUP6LkbZbjS1jKKccwgwsS1iUCsz3HLbtvNcV6U64V1"
+RAYDIUM_PROGRAM_ID = "675k1q2AYp7saS6Y1u4fRPs8yH1uS7S8S7S8S7S8S7S8"
+
+# --- DATA REGISTRY (Smart Money 2026 Edition) ---
+KNOWN_WALLETS = {
+    "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvu6Gn": "🏢 Binance Hot Wallet",
+    "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM": "🏢 Binance Hot Wallet 2",
+    "H88yS9KmY89U6pntYkjT9s2S1fDxtw74YAnY8r5x8k": "🏢 Coinbase",
+    "7fFCzxv5Jm6x5rK5L2q8yvK6yV5L2q8yvK6yV5L2": "🔥 SMART MONEY (Penguin Whale)",
+    "stupidmoney.sol": "🔥 SMART MONEY (Goat Legend)",
+    "9R8cTBpk99JYjG1mGm2iCJeQkUHTu5nUR3h29jCRWSUq": "🔥 SMART MONEY (PNUT Sniper)",
+    "6xSRNkqjdy6GSFF74m1oT4nwp1SnDJSyau7CoDz3Y7MC": "🔥 SMART MONEY (WIF God)",
+    "2itf6FWdZUqUb3fKUFPGnaTgqjjvWZwzrz129LCaqFa2": "🔥 SMART MONEY (Alpha Rotator)",
+    "TruthTerminal.sol": "🤖 SMART MONEY (AI Agent #1)",
+}
+
 # --- STATE MANAGEMENT ---
 last_known_price = 105.0
 PINNED_MESSAGE_ID = None 
 last_pulse_time = 0
-
-# --- DATA REGISTRY ---
-KNOWN_WALLETS = {
-    "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvu6Gn": "Binance Hot Wallet",
-    "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM": "Binance Hot Wallet 2",
-    "2QwUbEACJ3ppwfyH19QCSVvNrRzfuK5mNVNDsDMsZKMh": "Binance Cold Storage",
-    "H88yS9KmY89U6pntYkjT9s2S1fDxtw74YAnY8r5x8k": "Coinbase",
-    "AC59pU9r6p4jAiof6MvS6G68p8G6MvS6G68p8G6MvS6": "Bybit",
-    "5VC89L2q8yvK6yV5L2q8yvK6yV5L2q8yvK6yV5L2q8y": "OKX",
-    "HuDxqF2acC6f8T7Ea8K3P6qK4WjH4Z3h4z6f5e7h8j9k": "Kraken",
-    "6686pSGYmZpL9pS5v9K9pS5v9K9pS5v9K9pS5v9K9pS": "FixedFloat (Bridge)"
-}
 
 db_url = f"{SUPABASE_URL}/rest/v1"
 headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
@@ -40,150 +47,118 @@ solana_client = Client(ALCHEMY_URL)
 
 # --- CORE FUNCTIONS ---
 
+def check_token_safety(mint):
+    """Fetches a safety score and risks from RugCheck.xyz."""
+    try:
+        url = f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
+        res = requests.get(url, timeout=10).json()
+        
+        # Risk Score: 0-500 is generally 'Good'
+        score = res.get('score', 9999)
+        
+        if score < 600:
+            return "✅ SAFE (RugCheck Verified)", "Safe"
+        elif score < 2000:
+            return "⚠️ MODERATE RISK", "Risky"
+        else:
+            return "🚨 HIGH DANGER (Possible Rug)", "Danger"
+    except:
+        return "❓ Safety Unknown", "Unknown"
+
+def get_token_name(mint):
+    try:
+        res = requests.get(f"https://token.jup.ag/all", timeout=5).json()
+        for token in res:
+            if token['address'] == mint:
+                return f"${token['symbol']}"
+        return f"Token ({mint[:4]})"
+    except:
+        return "Meme Coin"
+
 def get_wallet_profile(address):
     if address in KNOWN_WALLETS:
-        return f"🏢 {KNOWN_WALLETS[address]}", True
+        return KNOWN_WALLETS[address], True
     try:
-        sigs_resp = solana_client.get_signatures_for_address(address, limit=10)
+        sigs_resp = solana_client.get_signatures_for_address(address, limit=5)
         sigs = sigs_resp.value
         if not sigs: return "🆕 New Wallet", False
         last_tx_time = sigs[0].block_time
         if (int(time.time()) - last_tx_time) > (180 * 24 * 60 * 60):
-            return "💤 Idle Wallet (6mo+)", False
-        if len(sigs) < 5: return "🐣 Fresh Wallet", False
-        return "👤 Active Private Wallet", False
+            return "💤 Dormant Whale", False
+        return "👤 Active Trader", False
     except:
         return "👤 Private Wallet", False
-
-def get_sol_price():
-    global last_known_price
-    try:
-        res = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", timeout=5).json()
-        last_known_price = float(res['solana']['usd'])
-        return last_known_price
-    except:
-        return last_known_price
 
 def send_alert(msg, is_loud=False):
     if not TELEGRAM_BOT_TOKEN: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": msg,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": False,
-            "disable_notification": not is_loud
+            "chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML",
+            "disable_web_page_preview": False, "disable_notification": not is_loud
         }
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"Telegram Error: {e}")
 
-def update_pulse_report():
-    """Calculates 24h flows and updates the pinned Telegram message."""
-    global PINNED_MESSAGE_ID
-    try:
-        # 1. Fetch alerts from Supabase
-        res = db.table("whale_alerts").select("*").execute()
-        
-        # 2. THE FIX: Filter out rows where created_at_unix is None (old data)
-        day_ago = time.time() - (24 * 60 * 60)
-        alerts = [
-            a for a in res.data 
-            if a.get('created_at_unix') is not None and float(a['created_at_unix']) > day_ago
-        ]
-        
-        if not alerts:
-            print("🕒 Pulse Report: No valid whale data found for the last 24h yet.")
-            return
-
-        inflow = sum(a['sol_amount'] for a in alerts if "BEARISH" in a.get('sentiment', ''))
-        outflow = sum(a['sol_amount'] for a in alerts if "BULLISH" in a.get('sentiment', ''))
-        net_flow = outflow - inflow
-        
-        status_emoji = "🟢" if net_flow > 0 else "🔴"
-        report = (f"📊 <b>24H WHALE PULSE REPORT</b>\n"
-                  f"━━━━━━━━━━━━━━━━━━\n"
-                  f"📥 <b>Total Inflow (to CEX):</b> {inflow:,.0f} SOL\n"
-                  f"📤 <b>Total Outflow (to Cold):</b> {outflow:,.0f} SOL\n\n"
-                  f"⚖️ <b>Net Market Movement:</b> {net_flow:,.0f} SOL {status_emoji}\n"
-                  f"<i>Last Updated: {time.strftime('%H:%M')} UTC</i>\n"
-                  f"━━━━━━━━━━━━━━━━━━\n"
-                  f"📌 <i>This report updates every 6 hours.</i>")
-
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/"
-        if PINNED_MESSAGE_ID is None:
-            resp = requests.post(url + "sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": report, "parse_mode": "HTML"}).json()
-            if resp.get('ok'):
-                PINNED_MESSAGE_ID = resp['result']['message_id']
-                requests.post(url + "pinChatMessage", json={"chat_id": TELEGRAM_CHAT_ID, "message_id": PINNED_MESSAGE_ID})
-        else:
-            requests.post(url + "editMessageText", json={
-                "chat_id": TELEGRAM_CHAT_ID, "message_id": PINNED_MESSAGE_ID, "text": report, "parse_mode": "HTML"
-            })
-    except Exception as e:
-        print(f"Pulse Error: {e}")
-
 def main():
     global last_pulse_time
-    print(f"🚀 ENGINE STARTING: WHALE INTEL V3 (Pulse + Silent Notifications)", flush=True)
+    print(f"🚀 ENGINE STARTING: WHALE INTEL V4.2 (Smart Money + RugCheck)", flush=True)
     last_processed_slot = 0
 
     while True:
         try:
-            # Check for Pulse Report update (Every 6 hours)
-            if time.time() - last_pulse_time > 21600:
-                update_pulse_report()
-                last_pulse_time = time.time()
-
             current_slot = solana_client.get_slot().value
             if current_slot <= last_processed_slot:
                 time.sleep(3)
                 continue
 
-            block = solana_client.get_block(current_slot, max_supported_transaction_version=0).value
+            block = solana_client.get_block(current_slot, encoding="jsonParsed", max_supported_transaction_version=0).value
+            
             if block and block.transactions:
                 for tx in block.transactions:
                     if not tx.meta or tx.meta.err: continue
-                    pre, post = tx.meta.pre_balances[0], tx.meta.post_balances[0]
-                    diff = (pre - post) / 10**9 
-                    
-                    if diff >= WHALE_THRESHOLD:
-                        sender = str(tx.transaction.message.account_keys[0])
-                        receiver = str(tx.transaction.message.account_keys[1])
-                        sig = str(tx.transaction.signatures[0])
-                        
-                        s_label, s_is_cex = get_wallet_profile(sender)
-                        r_label, r_is_cex = get_wallet_profile(receiver)
-                        
-                        sentiment = "🔄 Wallet Transfer"
-                        if s_is_cex and not r_is_cex: sentiment = "🟢 BULLISH (Exchange Outflow)"
-                        elif not s_is_cex and r_is_cex: sentiment = "🔴 BEARISH (Exchange Inflow)"
-                        
-                        price = get_sol_price()
-                        usd_val = diff * price
-                        
-                        msg = (f"🚨 <b>WHALE MOVEMENT DETECTED</b>\n\n"
-                               f"📊 <b>Sentiment:</b> {sentiment}\n"
-                               f"💰 <b>Amount:</b> {diff:,.2f} SOL (<b>${usd_val:,.2f} USD</b>)\n\n"
-                               f"📤 <b>From:</b> {s_label}\n"
-                               f"📥 <b>To:</b> {r_label}\n\n"
-                               f"🧼 <a href='https://bubblemaps.io/eth/address/{sender}'>Analyze Clusters (Bubblemaps)</a>\n"
-                               f"🔗 <a href='https://solscan.io/tx/{sig}'>View Transaction</a>")
-                        
-                        send_alert(msg, is_loud=(diff >= LOUD_THRESHOLD))
-                        db.table("whale_alerts").insert({
-                            "sol_amount": diff, "usd_value": usd_val, "signature": sig,
-                            "sender": sender, "receiver": receiver, "sentiment": sentiment,
-                            "created_at_unix": time.time()
-                        }).execute()
+                    sol_diff = abs(tx.meta.pre_balances[0] - tx.meta.post_balances[0]) / 10**9
+
+                    # --- SWAP DETECTION ---
+                    instructions = tx.transaction.message.instructions
+                    for instr in instructions:
+                        prog_id = str(instr.get('programId', ''))
+                        if prog_id in [JUPITER_PROGRAM_ID, RAYDIUM_PROGRAM_ID]:
+                            post_tokens = tx.meta.post_token_balances
+                            if post_tokens:
+                                for token in post_tokens:
+                                    mint = token['mint']
+                                    if mint not in ["So11111111111111111111111111111111111111112", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]:
+                                        
+                                        user_wallet = tx.transaction.message.account_keys[0]['pubkey']
+                                        w_label, _ = get_wallet_profile(user_wallet)
+                                        
+                                        # FLAG SMART MONEY & SAFETY
+                                        is_smart = "🔥 SMART MONEY" in w_label or "🤖" in w_label
+                                        safety_label, safety_status = check_token_safety(mint)
+                                        
+                                        title = "🚨 <b>SMART MONEY ENTRY</b> 🚨" if is_smart else "🦄 <b>MEME COIN ALPHA</b>"
+                                        token_symbol = get_token_name(mint)
+                                        
+                                        msg = (f"{title}\n\n"
+                                               f"💎 <b>Token:</b> {token_symbol}\n"
+                                               f"🛡️ <b>Security:</b> {safety_label}\n"
+                                               f"👤 <b>Trader:</b> {w_label}\n"
+                                               f"💰 <b>Size:</b> {sol_diff:,.2f} SOL\n\n"
+                                               f"🔍 <a href='https://rugcheck.xyz/tokens/{mint}'>View Security Audit</a>\n"
+                                               f"📊 <a href='https://birdeye.so/token/{mint}?chain=solana'>Check Trader PnL</a>\n"
+                                               f"📈 <a href='https://dexscreener.com/solana/{mint}'>View Chart</a>")
+                                        
+                                        # Silent alerts for 'Danger' coins to avoid spamming bad plays
+                                        is_loud = (is_smart or (sol_diff >= LOUD_THRESHOLD and safety_status != "Danger"))
+                                        send_alert(msg, is_loud=is_loud)
+                                        break 
 
             last_processed_slot = current_slot
             time.sleep(1)
-
         except Exception as e:
             time.sleep(10)
-            continue
 
 if __name__ == "__main__":
     main()
