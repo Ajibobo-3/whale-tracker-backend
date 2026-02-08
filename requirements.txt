@@ -1,0 +1,8 @@
+requests
+python-dotenv
+solana
+supabase
+solders
+
+
+
