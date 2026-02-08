@@ -1,8 +1,5 @@
 requests
 python-dotenv
-solana
+solana==0.35.0
+solders==0.21.0
 supabase
-solders
-
-
-

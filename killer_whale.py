@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 WHALE_THRESHOLD = 1000  
+# Use the environment variable or fallback to Alchemy
 ALCHEMY_URL = os.getenv("ALCHEMY_URL", "https://solana-mainnet.g.alchemy.com/v2/gV3Ws30jlt4osFOdMJCKD")
 
 # --- 🔑 NOTIFICATION & DB CHANNELS (SECURED) ---
@@ -33,33 +34,18 @@ KNOWN_WALLETS = {
 
 # --- 📊 FAIL-PROOF PRICE ORACLE ---
 def get_sol_price():
-    # Attempt 1: CoinGecko (Simple & Reliable)
     try:
         url = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
         res = requests.get(url, timeout=5).json()
-        price = float(res['solana']['usd'])
-        if price > 0: return price
+        return float(res['solana']['usd'])
     except Exception:
-        pass
-
-    # Attempt 2: CryptoCompare (Best Backup)
-    try:
-        url = "https://min-api.cryptocompare.com/data/price?fsym=SOL&tsyms=USD"
-        res = requests.get(url, timeout=5).json()
-        price = float(res['USD'])
-        if price > 0: return price
-    except Exception:
-        pass
-
-    # Attempt 3: Jupiter V2 (On-chain focus)
-    try:
-        url = f"https://api.jup.ag/price/v2?ids={SOL_MINT}"
-        response = requests.get(url, timeout=5).json()
-        price = float(response['data'][SOL_MINT]['price'])
-        if price > 0: return price
-    except Exception as e:
-        print(f"⚠️ All Oracles Failed. Using fallback. Error: {e}")
-        return 100.0 # Emergency fallback so site doesn't show $0
+        try:
+            url = "https://min-api.cryptocompare.com/data/price?fsym=SOL&tsyms=USD"
+            res = requests.get(url, timeout=5).json()
+            return float(res['USD'])
+        except Exception as e:
+            print(f"⚠️ Price Oracles Failed. Using fallback. Error: {e}")
+            return 105.0 # Fallback price
 
 # --- ☁️ SUPABASE LOGGING ---
 def log_to_supabase(sol_amount, usd_val, sender, receiver, sig):
@@ -91,15 +77,17 @@ def main():
     print(f"🌊 MONITORING FOR MOVES > {WHALE_THRESHOLD} SOL...", flush=True)
     client = Client(ALCHEMY_URL)
     
-    send_alert("🚀 <b>GROWTH ENGINE ACTIVATED</b>\n📊 Status: Price Oracles Restored")
+    send_alert("🚀 <b>GROWTH ENGINE ACTIVATED</b>\n📊 Status: Stabilized Loop (2.0s sleep)")
     
     last_processed_slot = 0
 
     while True:
         try:
             current_slot = client.get_slot().value
+            
+            # If we haven't moved to a new block, wait 2 seconds
             if current_slot <= last_processed_slot:
-                time.sleep(0.5)
+                time.sleep(2.0) 
                 continue
 
             block = client.get_block(current_slot, max_supported_transaction_version=0).value
@@ -108,7 +96,6 @@ def main():
                 for tx in block.transactions:
                     if not tx.meta or tx.meta.err: continue
                     
-                    # Calculate net SOL change for the first account (sender)
                     pre = tx.meta.pre_balances[0]
                     post = tx.meta.post_balances[0]
                     diff = (pre - post) / 10**9 
@@ -134,11 +121,14 @@ def main():
                         
                         if send_alert(msg):
                             log_to_supabase(diff, usd_value, sender, receiver, sig)
+                            # Small rest after processing a whale to keep the connection cool
+                            time.sleep(0.5)
 
             last_processed_slot = current_slot
             
         except Exception as e:
-            time.sleep(1)
+            print(f"⚠️ Loop Warning: {e}")
+            time.sleep(5) # Longer sleep if we hit a serious error (like rate limit)
             continue
 
 if __name__ == "__main__":
