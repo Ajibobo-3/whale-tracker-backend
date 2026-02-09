@@ -5,28 +5,35 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- SETUP ---
-WHALE_THRESHOLD = 0.1  # Set back to 1000 after testing
+# --- SETTINGS ---
+WHALE_THRESHOLD = 1000  # Restored to 1k SOL
 LOUD_THRESHOLD = 2500
 ALCHEMY_URL = os.getenv("ALCHEMY_URL")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") # Must be -1005254570403 in Railway
 ADMIN_USER_ID = 7302870957 
 
-# --- GLOBAL HEALTH STATE ---
+# --- KNOWN WALLETS ---
+KNOWN_WALLETS = {
+    "H88yS9KmYvM9B6NSpYXzAn8f2g5tY0eD": "Binance Hot Wallet",
+    "5tzC9Uo4H4XpWhmH5n8z9S6M6H8S5S5S": "Coinbase Cold",
+    "ASTRL": "ASTRAL Whale"
+}
+
+# --- GLOBAL STATE ---
 last_scan_time = time.time()
 start_time = time.time()
 blocks_scanned = 0
-last_known_price = 108.50 
+last_known_price = 110.00 
 last_update_id = 0
 
-# --- STATE INITIALIZATION ---
+# --- INITIALIZATION ---
 solana_client = Client(ALCHEMY_URL)
 db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
 
-# --- CORE UTILITY FUNCTIONS ---
+# --- UTILITIES ---
 
 def send_alert(chat_id, msg, is_loud=False):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -34,23 +41,14 @@ def send_alert(chat_id, msg, is_loud=False):
     try: 
         res = requests.post(url, json=payload, timeout=8)
         if res.status_code != 200:
-            print(f"❌ Telegram Error for {chat_id}: {res.status_code} - {res.text}", flush=True)
-        return res
-    except: return None
-
-def delete_message(chat_id, message_id):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
-    payload = {"chat_id": chat_id, "message_id": message_id}
-    try: requests.post(url, json=payload, timeout=5)
+            print(f"❌ Telegram Error: {res.text}", flush=True)
     except: pass
 
-def get_token_name(mint):
-    try:
-        res = requests.get(f"https://token.jup.ag/all", timeout=5).json()
-        for t in res:
-            if t['address'] == mint: return f"${t['symbol']}"
-        return f"Token ({mint[:4]})"
-    except: return "Meme Coin"
+def get_label(addr):
+    addr_str = str(addr)
+    label = KNOWN_WALLETS.get(addr_str, f"{addr_str[:4]}...{addr_str[-4:]}")
+    is_known = addr_str in KNOWN_WALLETS
+    return f"👤 {label}", is_known
 
 def get_live_sol_price():
     global last_known_price
@@ -60,10 +58,10 @@ def get_live_sol_price():
     except: pass
     return last_known_price
 
-# --- THREAD 1: THE LISTENER ---
+# --- THREAD 1: INSTANT COMMANDS ---
 def handle_commands_loop():
-    global last_update_id, last_scan_time, blocks_scanned
-    print("👂 Command Listener Thread Started", flush=True)
+    global last_update_id, last_scan_time
+    print("👂 Listener Thread Active", flush=True)
     while True:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
@@ -73,56 +71,29 @@ def handle_commands_loop():
             for update in res.get("result", []):
                 last_update_id = update["update_id"]
                 msg = update.get("message", {})
-                chat_id = msg.get("chat", {}).get("id")
                 user_id = msg.get("from", {}).get("id")
-                message_id = msg.get("message_id")
                 text = msg.get("text", "")
                 
                 if not user_id or not text: continue
 
-                # --- 1. ID AUTO-DISCOVERY (GROUP ONLY) ---
-                if text == "/getgroupid":
-                    discovery_msg = (
-                        f"📍 <b>ID Discovery Successful!</b>\n\n"
-                        f"Target Group: <code>{msg.get('chat', {}).get('title', 'Unknown')}</code>\n"
-                        f"Target ID: <code>{chat_id}</code>\n\n"
-                        f"🔑 <b>Action:</b> Paste this ID into your Railway <b>TELEGRAM_CHAT_ID</b>."
-                    )
-                    # Sends ONLY to you privately
-                    send_alert(ADMIN_USER_ID, discovery_msg)
-                    # Removes command from group chat
-                    if str(chat_id).startswith("-"):
-                        delete_message(chat_id, message_id)
-
-                # --- 2. STANDARD COMMANDS ---
-                elif text == "/start":
-                    send_alert(user_id, "🚀 <b>Omni-Tracker V7.9 Online.</b>")
+                if text == "/start":
+                    send_alert(user_id, "🚀 <b>Omni-Tracker V8.0: Active & Optimized.</b>")
 
                 elif text == "/health" and user_id == ADMIN_USER_ID:
-                    scanner_lag = time.time() - last_scan_time
-                    scanner_status = "✅ Active" if scanner_lag < 120 else "⚠️ Stalled"
-                    send_alert(ADMIN_USER_ID, f"🛡️ <b>Scanner:</b> {scanner_status}\n👂 <b>Listener:</b> ✅ Active")
-
-                elif text.startswith("/watch "):
-                    mint = text.replace("/watch ", "").strip()
-                    if len(mint) > 30:
-                        db.table("watchlist").upsert({"user_id": user_id, "mint": mint}).execute()
-                        send_alert(user_id, f"🎯 Monitoring {get_token_name(mint)}")
+                    lag = int(time.time() - last_scan_time)
+                    status = "✅ Active" if lag < 120 else "⚠️ Stalled"
+                    send_alert(ADMIN_USER_ID, f"🛡️ <b>Scanner:</b> {status} ({lag}s lag)\n🧱 <b>Blocks:</b> {blocks_scanned:,}")
 
         except Exception as e:
-            print(f"❌ Listener Error: {e}", flush=True)
             time.sleep(2)
 
-# --- THREAD 2: THE SCANNER ---
+# --- THREAD 2: BLOCK SCANNER ---
 def main():
     global last_scan_time, blocks_scanned
-    print(f"🚀 V7.9 ONLINE | Admin: {ADMIN_USER_ID}", flush=True)
+    print(f"🚀 V8.0 PRODUCTION ONLINE", flush=True)
     
-    cmd_thread = threading.Thread(target=handle_commands_loop, daemon=True)
-    cmd_thread.start()
-
+    threading.Thread(target=handle_commands_loop, daemon=True).start()
     last_slot = solana_client.get_slot().value - 1
-    last_heartbeat = time.time()
 
     while True:
         try:
@@ -143,13 +114,25 @@ def main():
             for tx in block.transactions:
                 if not tx.meta or tx.meta.err: continue
                 diff = abs(tx.meta.pre_balances[0] - tx.meta.post_balances[0]) / 10**9
-                usd_val = diff * current_price
-                sig = str(tx.transaction.signatures[0])
-
+                
                 if diff >= WHALE_THRESHOLD:
-                    msg = (f"🕵️ <b>TEST WHALE MOVE</b>\n💰 <b>{diff:,.2f} SOL</b>\n"
-                           f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a>")
-                    send_alert(TELEGRAM_CHAT_ID, msg)
+                    usd_val = diff * current_price
+                    sig = str(tx.transaction.signatures[0])
+                    sender = str(tx.transaction.message.account_keys[0])
+                    receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
+                    
+                    s_label, _ = get_label(sender)
+                    r_label, r_known = get_label(receiver)
+                    icon = "📥" if r_known else "🕵️"
+
+                    msg = (f"{icon} <b>WHALE MOVE DETECTED</b>\n"
+                           f"💰 <b>{diff:,.0f} SOL</b> (${usd_val:,.2f})\n"
+                           f"📤 <b>From:</b> {s_label}\n"
+                           f"📥 <b>To:</b> {r_label}\n"
+                           f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a> | "
+                           f"<a href='https://bubblemaps.io/solana/token/{sender}'>Bubble</a>")
+                    
+                    send_alert(TELEGRAM_CHAT_ID, msg, is_loud=(diff >= LOUD_THRESHOLD))
 
             last_slot = slot
         except: time.sleep(0.5)
