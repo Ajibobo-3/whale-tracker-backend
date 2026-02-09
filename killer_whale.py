@@ -82,19 +82,19 @@ def process_whale_move(tx, diff):
         sender = str(tx.transaction.message.account_keys[0])
         receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
 
-        # --- 1. AUTO-WATCHLIST (Fixed Column to 'created_at') ---
+        # --- AUTO-WATCHLIST (Configured for trigger_vol) ---
         if diff >= ALPHA_WATCH_THRESHOLD and hasattr(tx.meta, 'post_token_balances') and tx.meta.post_token_balances:
             mint = str(tx.meta.post_token_balances[0].mint)
             if mint != "So11111111111111111111111111111111111111112":
-                # UPDATED COLUMN: created_at
+                # Ensure keys match your Supabase columns: mint, created_at, trigger_vol
                 db.table("watchlist").upsert({
                     "mint": mint, 
                     "created_at": datetime.datetime.now(timezone.utc).isoformat(),
-                    "trigger_vol": diff
+                    "trigger_vol": diff  # <-- Matches the column you are adding
                 }).execute()
                 send_alert(TELEGRAM_CHAT_ID, f"🌟 <b>ALPHA DETECTED</b>\nWhale entered {get_token_name(mint)}.\n🔗 <a href='https://solscan.io/token/{mint}'>Token View</a>")
 
-        # --- 2. SIGNAL INTELLIGENCE ---
+        # --- SIGNAL INTELLIGENCE ---
         s_label, s_known = get_label(sender)
         r_label, r_known = get_label(receiver)
         
@@ -105,11 +105,9 @@ def process_whale_move(tx, diff):
         else:
             signal, icon = "🕵️ <b>NEUTRAL MOVE</b>", "🔄"
 
-        # --- 3. VIRAL SHARING ---
         tweet_text = quote(f"🚨 WHALE ALERT: {diff:,.0f} SOL (${usd_val:,.2f}) moved! #Solana")
         twitter_url = f"https://twitter.com/intent/tweet?text={tweet_text}"
 
-        # --- 4. TELEGRAM ALERT ---
         msg = (f"{icon} {signal}\n💰 <b>{diff:,.0f} SOL</b> (${usd_val:,.2f})\n\n"
                f"📤 <b>From:</b> {s_label}\n📥 <b>To:</b> {r_label}\n\n"
                f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a>")
@@ -141,7 +139,7 @@ def handle_commands_loop():
 
                 elif text == "/topbuy":
                     time_threshold = (datetime.datetime.now(timezone.utc) - datetime.timedelta(hours=24)).isoformat()
-                    # UPDATED COLUMN: created_at
+                    # Updated query to use trigger_vol and created_at
                     response = db.table("watchlist").select("mint, trigger_vol").gt("created_at", time_threshold).execute()
                     
                     if not response.data:
@@ -163,7 +161,7 @@ def handle_commands_loop():
 
 def main():
     global last_scan_time, blocks_scanned
-    print(f"🚀 V9.3 SCHEMA-SYNC ONLINE", flush=True)
+    print(f"🚀 V9.4 SCHEMA-STABLE ONLINE", flush=True)
     threading.Thread(target=handle_commands_loop, daemon=True).start()
     
     last_slot = solana_client.get_slot().value 
