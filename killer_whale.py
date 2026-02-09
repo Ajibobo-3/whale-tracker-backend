@@ -98,19 +98,21 @@ def handle_commands_loop():
                 if not user_id or not text: continue
 
                 if text == "/start":
-                    send_alert(user_id, "🚀 <b>Avitunde Intelligence V8.5 Active.</b>")
+                    send_alert(user_id, "🚀 <b>Avitunde Intelligence V8.6 Active.</b>")
                 elif text == "/health" and user_id == ADMIN_USER_ID:
                     lag = int(time.time() - last_scan_time)
                     status = "✅ Active" if lag < 120 else "⚠️ Stalled"
                     send_alert(ADMIN_USER_ID, f"🛡️ <b>Scanner:</b> {status} ({lag}s lag)\n🧱 <b>Blocks:</b> {blocks_scanned:,}")
         except: time.sleep(2)
 
-# --- THREAD 2: BLOCK SCANNER ---
+# --- THREAD 2: STABLE BLOCK SCANNER ---
 def main():
     global last_scan_time, blocks_scanned
-    print(f"🚀 V8.5 PRODUCTION ONLINE", flush=True)
+    print(f"🚀 V8.6 STABILITY PATCH ONLINE", flush=True)
     threading.Thread(target=handle_commands_loop, daemon=True).start()
-    last_slot = solana_client.get_slot().value - 1
+    
+    # JUMP TO LATEST SLOT: Prevents bot from getting stuck in the past
+    last_slot = solana_client.get_slot().value 
 
     while True:
         try:
@@ -127,46 +129,51 @@ def main():
             current_price = get_live_sol_price()
 
             for tx in block.transactions:
-                if not tx.meta or tx.meta.err: continue
-                diff = abs(tx.meta.pre_balances[0] - tx.meta.post_balances[0]) / 10**9
-                usd_val = diff * current_price
-                sig = str(tx.transaction.signatures[0])
-                sender = str(tx.transaction.message.account_keys[0])
-                receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
+                try: # SAFE TX PROCESSING
+                    if not tx.meta or tx.meta.err: continue
+                    diff = abs(tx.meta.pre_balances[0] - tx.meta.post_balances[0]) / 10**9
+                    usd_val = diff * current_price
+                    sig = str(tx.transaction.signatures[0])
+                    sender = str(tx.transaction.message.account_keys[0])
 
-                # --- 1. AUTO-WATCHLIST (FIXED DATETIME) ---
-                if diff >= ALPHA_WATCH_THRESHOLD and tx.meta.post_token_balances:
-                    mint = tx.meta.post_token_balances[0].mint
-                    if mint != "So11111111111111111111111111111111111111112":
-                        db.table("global_watchlist").upsert({
-                            "mint": mint, 
-                            "added_at": datetime.datetime.now(timezone.utc).isoformat(),
-                            "trigger_vol": diff
-                        }).execute()
-                        send_alert(TELEGRAM_CHAT_ID, f"🌟 <b>ALPHA DETECTED</b>\nWhale entered {get_token_name(mint)}.")
+                    # --- 1. AUTO-WATCHLIST (STABILIZED) ---
+                    if diff >= ALPHA_WATCH_THRESHOLD and hasattr(tx.meta, 'post_token_balances') and tx.meta.post_token_balances:
+                        mint = tx.meta.post_token_balances[0].mint
+                        if mint != "So11111111111111111111111111111111111111112":
+                            db.table("global_watchlist").upsert({
+                                "mint": mint, 
+                                "added_at": datetime.datetime.now(timezone.utc).isoformat(),
+                                "trigger_vol": diff
+                            }).execute()
+                            send_alert(TELEGRAM_CHAT_ID, f"🌟 <b>ALPHA DETECTED</b>\nWhale entered {get_token_name(mint)}.")
 
-                # --- 2. WHALE ALERTS + SIGNAL INTELLIGENCE ---
-                if diff >= WHALE_THRESHOLD:
-                    s_label, s_known = get_label(sender)
-                    r_label, r_known = get_label(receiver)
-                    
-                    if s_known and not r_known:
-                        signal, icon = "🚀 <b>BULLISH OUTFLOW</b>", "📤"
-                    elif not s_known and r_known:
-                        signal, icon = "🚨 <b>BEARISH INFLOW</b>", "📥"
-                    else:
-                        signal, icon = "🕵️ <b>NEUTRAL MOVE</b>", "🔄"
+                    # --- 2. WHALE ALERTS ---
+                    if diff >= WHALE_THRESHOLD:
+                        receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
+                        s_label, s_known = get_label(sender)
+                        r_label, r_known = get_label(receiver)
+                        
+                        if s_known and not r_known:
+                            signal, icon = "🚀 <b>BULLISH OUTFLOW</b>", "📤"
+                        elif not s_known and r_known:
+                            signal, icon = "🚨 <b>BEARISH INFLOW</b>", "📥"
+                        else:
+                            signal, icon = "🕵️ <b>NEUTRAL MOVE</b>", "🔄"
 
-                    tweet_text = quote(f"🚨 WHALE ALERT: {diff:,.0f} SOL (${usd_val:,.2f}) moved! #Solana\nTracked by Avitunde Intelligence 🏛️")
-                    twitter_url = f"https://twitter.com/intent/tweet?text={tweet_text}"
+                        tweet_text = quote(f"🚨 WHALE ALERT: {diff:,.0f} SOL (${usd_val:,.2f}) moved! #Solana\nTracked by Avitunde Intelligence 🏛️")
+                        twitter_url = f"https://twitter.com/intent/tweet?text={tweet_text}"
 
-                    msg = (f"{icon} {signal}\n💰 <b>{diff:,.0f} SOL</b> (${usd_val:,.2f})\n"
-                           f"📤 <b>From:</b> {s_label}\n📥 <b>To:</b> {r_label}\n"
-                           f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a>")
-                    
-                    send_alert_with_button(TELEGRAM_CHAT_ID, msg, twitter_url, is_loud=(diff >= LOUD_THRESHOLD))
+                        msg = (f"{icon} {signal}\n💰 <b>{diff:,.0f} SOL</b> (${usd_val:,.2f})\n"
+                               f"📤 <b>From:</b> {s_label}\n📥 <b>To:</b> {r_label}\n"
+                               f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a>")
+                        
+                        send_alert_with_button(TELEGRAM_CHAT_ID, msg, twitter_url, is_loud=(diff >= LOUD_THRESHOLD))
+                except: continue # Skip single bad transaction
+
             last_slot = slot
-        except: time.sleep(0.5)
+        except Exception as e:
+            print(f"⚠️ Scanner Error: {e}", flush=True)
+            time.sleep(1)
 
 if __name__ == "__main__":
     main()
