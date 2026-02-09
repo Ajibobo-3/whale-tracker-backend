@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- SETUP ---
-WHALE_THRESHOLD = 0.1
+WHALE_THRESHOLD = 0.1 # Very low for testing
 LOUD_THRESHOLD = 2500
 ALCHEMY_URL = os.getenv("ALCHEMY_URL")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -26,13 +26,20 @@ last_update_id = 0
 solana_client = Client(ALCHEMY_URL)
 db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
 
-# --- CORE UTILITY FUNCTIONS ---
+# --- UPDATED UTILITY WITH LOGGING ---
 
 def send_alert(chat_id, msg, is_loud=False):
+    """Sends a message and prints any errors to Railway Logs."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "disable_notification": not is_loud}
-    try: requests.post(url, json=payload, timeout=5)
-    except: pass
+    try: 
+        res = requests.post(url, json=payload, timeout=8)
+        if res.status_code != 200:
+            print(f"❌ Telegram Error for {chat_id}: {res.status_code} - {res.text}", flush=True)
+        return res
+    except Exception as e: 
+        print(f"❌ Connection Error: {e}", flush=True)
+        return None
 
 def delete_message(chat_id, message_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
@@ -82,22 +89,17 @@ def handle_commands_loop():
                     send_alert(user_id, "💡 Please use commands here in private!")
 
                 if text == "/start":
-                    send_alert(user_id, "🚀 <b>Omni-Tracker V7.7: Diagnostics Online.</b>")
+                    send_alert(user_id, "🚀 <b>Omni-Tracker V7.8: Live Debugging Active.</b>")
 
-                # --- NEW HEALTH COMMAND ---
+                # --- NEW ID DISCOVERY COMMAND ---
+                elif text == "/id":
+                    # Type /id in the GROUP to see what the bot thinks the ID is
+                    send_alert(chat_id, f"📍 <b>Chat ID:</b> <code>{chat_id}</code>\n(Paste this into Railway!)")
+
                 elif text == "/health" and user_id == ADMIN_USER_ID:
                     scanner_lag = time.time() - last_scan_time
                     scanner_status = "✅ Active" if scanner_lag < 120 else "⚠️ Stalled"
-                    uptime = str(datetime.timedelta(seconds=int(time.time() - start_time)))
-                    
-                    health_msg = (
-                        f"🛡️ <b>System Health Report</b>\n"
-                        f"━━━━━━━━━━━━━━\n"
-                        f"👁️ <b>Scanner:</b> {scanner_status} ({int(scanner_lag)}s lag)\n"
-                        f"👂 <b>Listener:</b> ✅ Active\n"
-                        f"🧱 <b>Blocks Scanned:</b> {blocks_scanned:,}\n"
-                        f"🕒 <b>Uptime:</b> {uptime}"
-                    )
+                    health_msg = f"🛡️ <b>Scanner:</b> {scanner_status} ({int(scanner_lag)}s lag)\n🧱 <b>Blocks:</b> {blocks_scanned:,}"
                     send_alert(ADMIN_USER_ID, health_msg)
 
                 elif text.startswith("/watch "):
@@ -106,23 +108,13 @@ def handle_commands_loop():
                         db.table("watchlist").upsert({"user_id": user_id, "mint": mint}).execute()
                         send_alert(user_id, f"🎯 Monitoring {get_token_name(mint)}")
 
-                elif text == "/list":
-                    res_db = db.table("watchlist").select("mint").eq("user_id", user_id).execute()
-                    mints = [item['mint'] for item in res_db.data]
-                    send_alert(user_id, "🎯 Watchlist:\n" + "\n".join([f"- {get_token_name(m)}" for m in mints]) if mints else "Empty.")
-
-                elif text == "/stats" and user_id == ADMIN_USER_ID:
-                    u_count = db.table("users").select("user_id", count="exact").execute()
-                    w_count = db.table("watchlist").select("mint", count="exact").execute()
-                    send_alert(ADMIN_USER_ID, f"📊 Users: {u_count.count}\n🎯 Watches: {w_count.count}")
-
         except Exception as e:
             time.sleep(2)
 
 # --- THREAD 2: THE SCANNER ---
 def main():
     global last_scan_time, blocks_scanned
-    print(f"🚀 V7.7 ONLINE | Admin: {ADMIN_USER_ID}", flush=True)
+    print(f"🚀 V7.8 ONLINE | Admin: {ADMIN_USER_ID}", flush=True)
     
     cmd_thread = threading.Thread(target=handle_commands_loop, daemon=True)
     cmd_thread.start()
@@ -131,13 +123,6 @@ def main():
     last_heartbeat = time.time()
 
     while True:
-        # HOURLY HEARTBEAT
-        if time.time() - last_heartbeat > 3600:
-            heartbeat_msg = f"🤖 <b>Status:</b> Active\n🧱 <b>Blocks:</b> {blocks_scanned:,}\n💰 <b>SOL:</b> ${get_live_sol_price():.2f}"
-            send_alert(TELEGRAM_CHAT_ID, heartbeat_msg)
-            last_heartbeat = time.time()
-            blocks_scanned = 0
-
         try:
             slot = solana_client.get_slot().value
             if slot <= last_slot:
@@ -149,7 +134,6 @@ def main():
                 last_slot = slot
                 continue
             
-            # --- HEALTH UPDATE ---
             last_scan_time = time.time()
             blocks_scanned += 1
             current_price = get_live_sol_price()
@@ -161,9 +145,10 @@ def main():
                 sig = str(tx.transaction.signatures[0])
 
                 if diff >= WHALE_THRESHOLD:
-                    msg = (f"🕵️ <b>WHALE MOVE</b>\n💰 <b>{diff:,.0f} SOL</b> (${usd_val:,.2f})\n"
+                    msg = (f"🕵️ <b>TEST WHALE MOVE</b>\n💰 <b>{diff:,.2f} SOL</b>\n"
                            f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a>")
-                    send_alert(TELEGRAM_CHAT_ID, msg, is_loud=(diff >= LOUD_THRESHOLD))
+                    # SEND TO GROUP
+                    send_alert(TELEGRAM_CHAT_ID, msg)
 
             last_slot = slot
         except: time.sleep(0.5)
