@@ -10,7 +10,6 @@ load_dotenv()
 # --- SETTINGS ---
 WHALE_THRESHOLD = 0.1 
 LOUD_THRESHOLD = 2500  
-# Ensure these are set in Railway Variables
 ALCHEMY_URL = os.getenv("ALCHEMY_URL")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -71,71 +70,64 @@ def send_alert(msg, is_loud=False):
         r = requests.post(url, json=payload)
         if r.status_code != 200: print(f"❌ Telegram Error: {r.text}")
     except Exception as e:
-        print(f"❌ Network Error sending Telegram: {e}")
+        print(f"❌ Network Error: {e}")
 
 def main():
     print("🚀 V4.3 STARTING: MEME ALPHA MODE ACTIVE", flush=True)
-    # Initialize last_slot to the current slot - 1 to start immediately
     try:
         last_slot = solana_client.get_slot().value - 1
-        print(f"🛰️ Connected to Solana. Starting from slot: {last_slot}", flush=True)
-    except Exception as e:
-        print(f"❌ Critical Error: Could not connect to RPC. {e}")
-        return
+        print(f"🛰️ Connected. Starting from: {last_slot}", flush=True)
+    except: return
 
     while True:
         try:
             slot = solana_client.get_slot().value
             if slot <= last_slot:
-                time.sleep(1) # Faster polling
+                time.sleep(1)
                 continue
             
-            # Fetch block with max_supported_transaction_version for V4.3 compatibility
-            block_resp = solana_client.get_block(slot, encoding="jsonParsed", max_supported_transaction_version=0)
-            block = block_resp.value
-            
+            block = solana_client.get_block(slot, encoding="jsonParsed", max_supported_transaction_version=0).value
             if not block or not block.transactions:
                 last_slot = slot
                 continue
             
-            print(f"🔎 Scanning Block {slot} ({len(block.transactions)} txs)...", flush=True)
+            print(f"🔎 Scanning Block {slot}...", flush=True)
             
             for tx in block.transactions:
                 if not tx.meta or tx.meta.err: continue
                 
+                # BALANCE CHECK
                 price = get_sol_price()
-                # Use pre/post balances from meta
                 diff = abs(tx.meta.pre_balances[0] - tx.meta.post_balances[0]) / 10**9
                 usd = diff * price
 
                 # --- THE MEME CHECK ---
                 is_meme = False
                 for instr in tx.transaction.message.instructions:
-                    prog = str(instr.get('programId', ''))
+                    # FIXED: Use attribute access for Solders objects
+                    prog = str(getattr(instr, 'program_id', ''))
+                    
                     if prog in [JUPITER_PROGRAM_ID, RAYDIUM_PROGRAM_ID]:
                         post = tx.meta.post_token_balances
                         if post:
-                            # Find the token that isn't SOL or USDC
                             mint = None
-                            for balance in post:
-                                m = balance['mint']
-                                if m not in ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]:
-                                    mint = m
+                            for b in post:
+                                if b.mint not in ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]:
+                                    mint = b.mint
                                     break
                             
                             if mint:
-                                wallet = tx.transaction.message.account_keys[0].pubkey if hasattr(tx.transaction.message.account_keys[0], 'pubkey') else str(tx.transaction.message.account_keys[0])
+                                # Access wallet from account_keys attribute
+                                wallet = str(tx.transaction.message.account_keys[0])
                                 label, is_smart = get_wallet_profile(wallet)
                                 safety, status = check_token_safety(mint)
                                 title = "🚨 <b>SMART MONEY BUY</b>" if is_smart else "🦄 <b>MEME ALPHA</b>"
                                 
-                                msg = (f"{title}\n"
-                                       f"━━━━━━━━━━━━━━\n"
+                                msg = (f"{title}\n━━━━━━━━━━━━━━\n"
                                        f"💎 <b>Token:</b> {get_token_name(mint)}\n"
                                        f"🛡️ <b>Safety:</b> {safety}\n"
                                        f"👤 <b>Trader:</b> {label}\n"
-                                       f"💰 <b>Size:</b> ${usd:,.2f}\n"
-                                       f"━━━━━━━━━━━━━━\n"
+                                       f"💰 <b>Size:</b> ${usd:,.2f}\n━━━━━━━━━━━━━━\n"
                                        f"📊 <a href='https://birdeye.so/token/{mint}?chain=solana'>Trader PnL</a>\n"
                                        f"📈 <a href='https://dexscreener.com/solana/{mint}'>Live Chart</a>")
                                 
@@ -145,16 +137,17 @@ def main():
                 
                 # --- THE WHALE FALLBACK ---
                 if not is_meme and diff >= WHALE_THRESHOLD:
-                    msg = (f"🐋 <b>WHALE SOL MOVE</b>\n"
-                           f"━━━━━━━━━━━━━━\n"
+                    # Signature access fix
+                    sig = str(tx.transaction.signatures[0])
+                    msg = (f"🐋 <b>WHALE SOL MOVE</b>\n━━━━━━━━━━━━━━\n"
                            f"💰 <b>Amount:</b> {diff:,.2f} SOL (${usd:,.2f})\n"
-                           f"🔗 <a href='https://solscan.io/tx/{tx.transaction.signatures[0]}'>View Transaction</a>")
+                           f"🔗 <a href='https://solscan.io/tx/{sig}'>View Transaction</a>")
                     send_alert(msg, is_loud=(diff >= LOUD_THRESHOLD))
 
             last_slot = slot
         except Exception as e:
             print(f"⚠️ System Hiccup: {e}", flush=True)
-            time.sleep(2)
+            time.sleep(1)
 
 if __name__ == "__main__":
     main()
