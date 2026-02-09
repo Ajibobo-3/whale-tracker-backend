@@ -1,4 +1,4 @@
-import time, requests, os, threading
+import time, requests, os, threading, datetime
 from solana.rpc.api import Client
 from postgrest import SyncPostgrestClient
 from dotenv import load_dotenv
@@ -15,13 +15,16 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 ADMIN_USER_ID = 7302870957 
 
-# --- STATE ---
-solana_client = Client(ALCHEMY_URL)
-db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
+# --- GLOBAL HEALTH STATE ---
+last_scan_time = time.time()
+start_time = time.time()
+blocks_scanned = 0
 last_known_price = 108.50 
 last_update_id = 0
-last_heartbeat = time.time()
-blocks_scanned = 0
+
+# --- STATE INITIALIZATION ---
+solana_client = Client(ALCHEMY_URL)
+db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
 
 # --- CORE UTILITY FUNCTIONS ---
 
@@ -53,13 +56,9 @@ def get_live_sol_price():
     except: pass
     return last_known_price
 
-def get_label(addr):
-    addr_str = str(addr)
-    return f"👤 {addr_str[:4]}...{addr_str[-4:]}", False
-
 # --- THREAD 1: THE LISTENER ---
 def handle_commands_loop():
-    global last_update_id
+    global last_update_id, last_scan_time, blocks_scanned
     print("👂 Command Listener Thread Started", flush=True)
     while True:
         try:
@@ -77,14 +76,30 @@ def handle_commands_loop():
                 
                 if not user_id or not text: continue
 
-                # Command Logic (Cleaned for speed)
+                # CLEANUP: Delete group commands
                 if text.startswith("/") and str(chat_id).startswith("-"):
                     delete_message(chat_id, message_id)
                     send_alert(user_id, "💡 Please use commands here in private!")
 
                 if text == "/start":
-                    send_alert(user_id, "🚀 <b>Omni-Tracker V7.6: Instant Response Active.</b>")
-                
+                    send_alert(user_id, "🚀 <b>Omni-Tracker V7.7: Diagnostics Online.</b>")
+
+                # --- NEW HEALTH COMMAND ---
+                elif text == "/health" and user_id == ADMIN_USER_ID:
+                    scanner_lag = time.time() - last_scan_time
+                    scanner_status = "✅ Active" if scanner_lag < 120 else "⚠️ Stalled"
+                    uptime = str(datetime.timedelta(seconds=int(time.time() - start_time)))
+                    
+                    health_msg = (
+                        f"🛡️ <b>System Health Report</b>\n"
+                        f"━━━━━━━━━━━━━━\n"
+                        f"👁️ <b>Scanner:</b> {scanner_status} ({int(scanner_lag)}s lag)\n"
+                        f"👂 <b>Listener:</b> ✅ Active\n"
+                        f"🧱 <b>Blocks Scanned:</b> {blocks_scanned:,}\n"
+                        f"🕒 <b>Uptime:</b> {uptime}"
+                    )
+                    send_alert(ADMIN_USER_ID, health_msg)
+
                 elif text.startswith("/watch "):
                     mint = text.replace("/watch ", "").strip()
                     if len(mint) > 30:
@@ -99,21 +114,21 @@ def handle_commands_loop():
                 elif text == "/stats" and user_id == ADMIN_USER_ID:
                     u_count = db.table("users").select("user_id", count="exact").execute()
                     w_count = db.table("watchlist").select("mint", count="exact").execute()
-                    send_alert(ADMIN_USER_ID, f"📊 Total Users: {u_count.count}\n🎯 Total Watches: {w_count.count}")
+                    send_alert(ADMIN_USER_ID, f"📊 Users: {u_count.count}\n🎯 Watches: {w_count.count}")
 
         except Exception as e:
             time.sleep(2)
 
 # --- THREAD 2: THE SCANNER ---
 def main():
-    global last_heartbeat, blocks_scanned
-    print(f"🚀 V7.6 ONLINE | Admin: {ADMIN_USER_ID}", flush=True)
+    global last_scan_time, blocks_scanned
+    print(f"🚀 V7.7 ONLINE | Admin: {ADMIN_USER_ID}", flush=True)
     
-    # Start the Command Listener in the background
     cmd_thread = threading.Thread(target=handle_commands_loop, daemon=True)
     cmd_thread.start()
 
     last_slot = solana_client.get_slot().value - 1
+    last_heartbeat = time.time()
 
     while True:
         # HOURLY HEARTBEAT
@@ -134,6 +149,8 @@ def main():
                 last_slot = slot
                 continue
             
+            # --- HEALTH UPDATE ---
+            last_scan_time = time.time()
             blocks_scanned += 1
             current_price = get_live_sol_price()
 
@@ -143,7 +160,6 @@ def main():
                 usd_val = diff * current_price
                 sig = str(tx.transaction.signatures[0])
 
-                # WHALE CHECK (>= 1000 SOL)
                 if diff >= WHALE_THRESHOLD:
                     msg = (f"🕵️ <b>WHALE MOVE</b>\n💰 <b>{diff:,.0f} SOL</b> (${usd_val:,.2f})\n"
                            f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a>")
