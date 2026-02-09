@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- SETTINGS ---
-WHALE_THRESHOLD = 0.1 
+WHALE_THRESHOLD = 1000
 LOUD_THRESHOLD = 2500  
 ALCHEMY_URL = os.getenv("ALCHEMY_URL")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
