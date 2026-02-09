@@ -1,4 +1,5 @@
 import time, requests, os, threading, datetime
+from datetime import timezone
 from urllib.parse import quote
 from solana.rpc.api import Client
 from postgrest import SyncPostgrestClient
@@ -9,7 +10,7 @@ load_dotenv()
 # --- SETTINGS ---
 WHALE_THRESHOLD = 1000  
 LOUD_THRESHOLD = 2500
-ALPHA_WATCH_THRESHOLD = 500 # Threshold for Auto-Watchlist entries
+ALPHA_WATCH_THRESHOLD = 500 
 ALCHEMY_URL = os.getenv("ALCHEMY_URL")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -30,7 +31,6 @@ KNOWN_WALLETS = {
 
 # --- GLOBAL STATE ---
 last_scan_time = time.time()
-start_time = time.time()
 blocks_scanned = 0
 last_known_price = 110.00 
 last_update_id = 0
@@ -51,13 +51,8 @@ def send_alert(chat_id, msg, is_loud=False):
     except: pass
 
 def send_alert_with_button(chat_id, msg, twitter_link, is_loud=False):
-    """Sends alert with a 'Share on X' button for viral growth."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    keyboard = {
-        "inline_keyboard": [[
-            {"text": "🐦 Share on X", "url": twitter_link}
-        ]]
-    }
+    keyboard = {"inline_keyboard": [[{"text": "🐦 Share on X", "url": twitter_link}]]}
     payload = {
         "chat_id": chat_id, 
         "text": msg, 
@@ -75,9 +70,7 @@ def get_label(addr):
     return f"👤 {label}", is_known
 
 def get_token_name(mint):
-    try:
-        # Simplified for performance; returns mint if name not found
-        return f"Token ({str(mint)[:4]})"
+    try: return f"Token ({str(mint)[:4]})"
     except: return "Unknown Token"
 
 def get_live_sol_price():
@@ -97,31 +90,25 @@ def handle_commands_loop():
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
             params = {"offset": last_update_id + 1, "timeout": 10}
             res = requests.get(url, params=params, timeout=15).json()
-            
             for update in res.get("result", []):
                 last_update_id = update["update_id"]
                 msg = update.get("message", {})
                 user_id = msg.get("from", {}).get("id")
                 text = msg.get("text", "")
-                
                 if not user_id or not text: continue
 
                 if text == "/start":
-                    send_alert(user_id, "🚀 <b>Omni-Tracker V8.4: Viral Alpha Active.</b>")
-
+                    send_alert(user_id, "🚀 <b>Avitunde Intelligence V8.5 Active.</b>")
                 elif text == "/health" and user_id == ADMIN_USER_ID:
                     lag = int(time.time() - last_scan_time)
                     status = "✅ Active" if lag < 120 else "⚠️ Stalled"
                     send_alert(ADMIN_USER_ID, f"🛡️ <b>Scanner:</b> {status} ({lag}s lag)\n🧱 <b>Blocks:</b> {blocks_scanned:,}")
-
-        except Exception as e:
-            time.sleep(2)
+        except: time.sleep(2)
 
 # --- THREAD 2: BLOCK SCANNER ---
 def main():
     global last_scan_time, blocks_scanned
-    print(f"🚀 V8.4 VIRAL ALPHA ONLINE", flush=True)
-    
+    print(f"🚀 V8.5 PRODUCTION ONLINE", flush=True)
     threading.Thread(target=handle_commands_loop, daemon=True).start()
     last_slot = solana_client.get_slot().value - 1
 
@@ -129,13 +116,11 @@ def main():
         try:
             slot = solana_client.get_slot().value
             if slot <= last_slot:
-                time.sleep(0.5)
-                continue
+                time.sleep(0.5); continue
             
             block = solana_client.get_block(slot, encoding="jsonParsed", max_supported_transaction_version=0).value
             if not block or not block.transactions:
-                last_slot = slot
-                continue
+                last_slot = slot; continue
             
             last_scan_time = time.time()
             blocks_scanned += 1
@@ -149,44 +134,37 @@ def main():
                 sender = str(tx.transaction.message.account_keys[0])
                 receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
 
-                # --- 1. AUTO-WATCHLIST LOGIC ---
-                if diff >= ALPHA_WATCH_THRESHOLD:
-                    if tx.meta.post_token_balances:
-                        # Grab the first non-SOL mint detected in the swap
-                        mint = tx.meta.post_token_balances[0].mint
-                        if mint != "So11111111111111111111111111111111111111112":
-                            db.table("global_watchlist").upsert({
-                                "mint": mint, 
-                                "added_at": datetime.datetime.utcnow().isoformat(),
-                                "trigger_vol": diff
-                            }).execute()
-                            
-                            send_alert(TELEGRAM_CHAT_ID, f"🌟 <b>NEW ALPHA DETECTED</b>\nWhale just entered {get_token_name(mint)}. Token added to Auto-Watchlist!")
+                # --- 1. AUTO-WATCHLIST (FIXED DATETIME) ---
+                if diff >= ALPHA_WATCH_THRESHOLD and tx.meta.post_token_balances:
+                    mint = tx.meta.post_token_balances[0].mint
+                    if mint != "So11111111111111111111111111111111111111112":
+                        db.table("global_watchlist").upsert({
+                            "mint": mint, 
+                            "added_at": datetime.datetime.now(timezone.utc).isoformat(),
+                            "trigger_vol": diff
+                        }).execute()
+                        send_alert(TELEGRAM_CHAT_ID, f"🌟 <b>ALPHA DETECTED</b>\nWhale entered {get_token_name(mint)}.")
 
-                # --- 2. WHALE ALERT LOGIC ---
+                # --- 2. WHALE ALERTS + SIGNAL INTELLIGENCE ---
                 if diff >= WHALE_THRESHOLD:
-                    s_label, _ = get_label(sender)
+                    s_label, s_known = get_label(sender)
                     r_label, r_known = get_label(receiver)
-                    icon = "📥" if r_known else "🕵️"
+                    
+                    if s_known and not r_known:
+                        signal, icon = "🚀 <b>BULLISH OUTFLOW</b>", "📤"
+                    elif not s_known and r_known:
+                        signal, icon = "🚨 <b>BEARISH INFLOW</b>", "📥"
+                    else:
+                        signal, icon = "🕵️ <b>NEUTRAL MOVE</b>", "🔄"
 
-                    # Viral Twitter Link Generation
-                    tweet_text = quote(
-                        f"🚨 WHALE ALERT: {diff:,.0f} SOL (${usd_val:,.2f}) moved on #Solana!\n\n"
-                        f"Tracked by Avitunde Intelligence 🏛️\n"
-                        f"Join the Alpha: https://t.me/your_group_link\n"
-                        f"$SOL #Crypto #WhaleAlert"
-                    )
+                    tweet_text = quote(f"🚨 WHALE ALERT: {diff:,.0f} SOL (${usd_val:,.2f}) moved! #Solana\nTracked by Avitunde Intelligence 🏛️")
                     twitter_url = f"https://twitter.com/intent/tweet?text={tweet_text}"
 
-                    msg = (f"{icon} <b>WHALE MOVE DETECTED</b>\n"
-                           f"💰 <b>{diff:,.0f} SOL</b> (${usd_val:,.2f})\n"
-                           f"📤 <b>From:</b> {s_label}\n"
-                           f"📥 <b>To:</b> {r_label}\n"
-                           f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a> | "
-                           f"<a href='https://bubblemaps.io/solana/token/{sender}'>Bubble</a>")
+                    msg = (f"{icon} {signal}\n💰 <b>{diff:,.0f} SOL</b> (${usd_val:,.2f})\n"
+                           f"📤 <b>From:</b> {s_label}\n📥 <b>To:</b> {r_label}\n"
+                           f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a>")
                     
                     send_alert_with_button(TELEGRAM_CHAT_ID, msg, twitter_url, is_loud=(diff >= LOUD_THRESHOLD))
-
             last_slot = slot
         except: time.sleep(0.5)
 
