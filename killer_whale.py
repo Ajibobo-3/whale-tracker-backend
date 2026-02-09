@@ -7,7 +7,7 @@ load_dotenv()
 # --- SETUP ---
 WHALE_THRESHOLD = 1000
 LOUD_THRESHOLD = 2500
-PINNED_MESSAGE_ID = None  # Add your Pinned Message ID here once generated
+PINNED_MESSAGE_ID = None  # Your bot will print this ID in the logs on the first run
 ALCHEMY_URL = os.getenv("ALCHEMY_URL")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -17,7 +17,7 @@ RAYDIUM_PROGRAM_ID = "675k1q2AYp7saS6Y1u4fRPs8yH1uS7S8S7S8S7S8S7S8"
 
 # --- STATE ---
 solana_client = Client(ALCHEMY_URL)
-last_known_price = 100.0  # Updated to a more realistic fallback for Feb 2026
+last_known_price = 100.0  # Realistic fallback
 start_time = time.time()
 pulse_data = {"sol": 0, "memes": []}
 
@@ -27,8 +27,9 @@ KNOWN_WALLETS = {
     "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM": "🏢 Binance Hot Wallet 2",
     "2QwUbEACJ3ppwfyH19QCSVvNrRzfuK5mNVNDsDMsZKMh": "🏢 Binance Cold Storage",
     "H88yS9KmY89U6pntYkjT9s2S1fDxtw74YAnY8r5x8k": "🏢 Coinbase",
-    "6U6r7S2S1fDxtw74YAnY8r5x8k": "🏢 Bybit Hot Wallet",
+    "AC5RDfQFmDS1deWZos921JfqscXdByf8BKHm5ACWpGsF": "🏢 Bybit Hot Wallet",
     "3QwUbEACJ3ppwfyH19QCSVvNrRzfuK5": "🏢 OKX Wallet",
+    "FWznbcNXWQuHTawe9RxvQ2LdCENqHS1Xf9C1d1hSSZKD": "🏢 Kraken Hot Wallet",
     "7fFCzxv5Jm6x5rK5L2q8yvK6yV5L2q8yvK6yV5L2": "🔥 SMART MONEY (Penguin Whale)",
     "stupidmoney.sol": "🔥 SMART MONEY (Goat Legend)",
     "TruthTerminal.sol": "🤖 SMART MONEY (AI Agent #1)",
@@ -39,13 +40,11 @@ KNOWN_WALLETS = {
 def get_sol_price():
     global last_known_price
     try:
-        # Try Binance first
         res = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT", timeout=3).json()
         last_known_price = float(res['price'])
         return last_known_price
     except:
         try:
-            # Fallback to Jupiter Price API
             jup_res = requests.get("https://price.jup.ag/v4/price?ids=SOL", timeout=3).json()
             last_known_price = float(jup_res['data']['SOL']['price'])
             return last_known_price
@@ -70,7 +69,7 @@ def check_token_safety(mint):
 def get_label(addr):
     addr_str = str(addr)
     if addr_str in KNOWN_WALLETS: return KNOWN_WALLETS[addr_str], True
-    return "👤 Private Wallet", False
+    return f"👤 {addr_str[:4]}...{addr_str[-4:]}", False
 
 def send_alert(msg, is_loud=False):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -97,11 +96,10 @@ def update_pulse_report(data):
 
 def main():
     global start_time, pulse_data
-    print("🚀 V5.0 OMNI-TRACKER ONLINE", flush=True)
+    print("🚀 V5.1 OMNI-TRACKER ONLINE", flush=True)
     last_slot = solana_client.get_slot().value - 1
 
     while True:
-        # Check Timer (7200s = 2h)
         if time.time() - start_time >= 7200:
             update_pulse_report(pulse_data)
             start_time, pulse_data = time.time(), {"sol": 0, "memes": []}
@@ -128,8 +126,9 @@ def main():
                 receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
                 s_label, s_is_known = get_label(sender)
                 r_label, r_is_known = get_label(receiver)
-                
-                # --- SCENARIO 1: SWAP ---
+                usd_val = diff * price
+
+                # --- SCENARIO 1: SWAP DETECTED ---
                 is_meme = False
                 for instr in tx.transaction.message.instructions:
                     prog = str(getattr(instr, 'program_id', ''))
@@ -140,34 +139,39 @@ def main():
                             if mint:
                                 name = get_token_name(mint)
                                 safety = check_token_safety(mint)
-                                msg = (f"🔄 <b>SWAP DETECTED</b>\n━━━━━━━━━━━━━━\n"
+                                msg = (f"🔄 <b>MEME COIN SWAP</b>\n"
+                                       f"━━━━━━━━━━━━━━\n"
                                        f"💰 <b>{diff:,.0f} SOL</b> swapped for <b>{name}</b>\n"
                                        f"🛡️ <b>Safety:</b> {safety}\n"
-                                       f"👤 <b>Trader:</b> {s_label}")
+                                       f"👤 <b>Trader:</b> {s_label}\n"
+                                       f"📊 <a href='https://birdeye.so/token/{mint}?chain=solana'>Trader PnL</a> | <a href='https://dexscreener.com/solana/{mint}'>Chart</a>")
                                 send_alert(msg)
                                 pulse_data["memes"].append(name)
                                 is_meme = True
                                 break
 
-                # --- SCENARIO 2: TRANSFER (Logic Fix for Flow Type) ---
+                # --- SCENARIO 2: CLASSIFIED TRANSFERS ---
                 if not is_meme:
                     pulse_data["sol"] += diff
-                    usd_val = diff * price
                     
-                    if s_is_known and not r_is_known:
-                        icon, type_label = "📤", f"EXCHANGE OUTFLOW (from {s_label})"
-                    elif r_is_known and not s_is_known:
-                        icon, type_label = "📥", f"EXCHANGE INFLOW (to {r_label})"
+                    if r_is_known and not s_is_known:
+                        icon, title, vibe = "📥", "EXCHANGE INFLOW", "🚩 Potential Sell Pressure"
+                    elif s_is_known and not r_is_known:
+                        icon, title, vibe = "📤", "EXCHANGE OUTFLOW", "🟢 Bullish Accumulation"
                     elif s_is_known and r_is_known:
-                        icon, type_label = "🏢", "EXCHANGE TO EXCHANGE"
+                        icon, title, vibe = "🏢", "EXCHANGE TO EXCHANGE", "⚪ Neutral Rebalancing"
                     else:
-                        icon, type_label = "🕵️", "PRIVATE WALLET TRANSFER"
+                        icon, title, vibe = "🕵️", "PRIVATE TRANSFER", "⚪ Neutral Move"
 
-                    msg = (f"{icon} <b>{type_label}</b>\n━━━━━━━━━━━━━━\n"
+                    msg = (f"{icon} <b>{title}</b>\n"
+                           f"━━━━━━━━━━━━━━\n"
                            f"💰 <b>{diff:,.0f} SOL</b> (<b>${usd_val:,.2f}</b>)\n"
+                           f"📝 {vibe}\n"
                            f"📤 <b>From:</b> {s_label}\n"
                            f"📥 <b>To:</b> {r_label}\n"
-                           f"🔗 <a href='https://solscan.io/tx/{tx.transaction.signatures[0]}'>View Tx</a>")
+                           f"━━━━━━━━━━━━━━\n"
+                           f"🔗 <a href='https://solscan.io/tx/{tx.transaction.signatures[0]}'>View on Solscan</a>")
+                    
                     send_alert(msg, is_loud=(diff >= LOUD_THRESHOLD))
 
             last_slot = slot
