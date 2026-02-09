@@ -44,14 +44,14 @@ def get_live_sol_price():
     return last_known_price
 
 def get_label(addr):
-    addr_str = str(addr)
+    addr_str = str(addr) # Force to string
     label = KNOWN_WALLETS.get(addr_str, f"{addr_str[:4]}...{addr_str[-4:]}")
     is_known = addr_str in KNOWN_WALLETS
     return f"👤 {label}", is_known
 
 def get_token_name(mint):
-    # Shorten mint for cleaner UI
-    return f"Token ({str(mint)[:4]}...{str(mint)[-4:]})"
+    mint_str = str(mint) # Force to string
+    return f"Token ({mint_str[:4]}...{mint_str[-4:]})"
 
 def send_alert(chat_id, msg, is_loud=False):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -75,19 +75,19 @@ def send_alert_with_button(chat_id, msg, twitter_link, is_loud=False):
 # --- 4. THE ALPHA ENGINE ---
 
 def process_whale_move(tx, diff):
-    """
-    Unified logic for Signal Intelligence, Viral Sharing, and Auto-Watchlist.
-    """
     try:
         current_price = last_known_price
         usd_val = diff * current_price
         sig = str(tx.transaction.signatures[0])
+        
+        # FIX: Explicitly convert Pubkeys to strings
         sender = str(tx.transaction.message.account_keys[0])
         receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
 
-        # --- 1. AUTO-WATCHLIST (Alpha Detection) ---
+        # --- 1. AUTO-WATCHLIST ---
         if diff >= ALPHA_WATCH_THRESHOLD and hasattr(tx.meta, 'post_token_balances') and tx.meta.post_token_balances:
-            mint = tx.meta.post_token_balances[0].mint
+            # FIX: Convert mint to string
+            mint = str(tx.meta.post_token_balances[0].mint)
             if mint != "So11111111111111111111111111111111111111112":
                 db.table("global_watchlist").upsert({
                     "mint": mint, 
@@ -96,7 +96,7 @@ def process_whale_move(tx, diff):
                 }).execute()
                 send_alert(TELEGRAM_CHAT_ID, f"🌟 <b>ALPHA DETECTED</b>\nWhale entered {get_token_name(mint)}.\n🔗 <a href='https://solscan.io/token/{mint}'>Token View</a>")
 
-        # --- 2. SIGNAL INTELLIGENCE (Labels) ---
+        # --- 2. SIGNAL INTELLIGENCE ---
         s_label, s_known = get_label(sender)
         r_label, r_known = get_label(receiver)
         
@@ -110,7 +110,7 @@ def process_whale_move(tx, diff):
             signal, icon = "🕵️ <b>NEUTRAL MOVE</b>", "🔄"
             note = "<i>(Private wallet transfer)</i>"
 
-        # --- 3. VIRAL SHARING (Twitter/X) ---
+        # --- 3. VIRAL SHARING ---
         tweet_text = quote(
             f"🚨 WHALE ALERT: {diff:,.0f} SOL (${usd_val:,.2f}) moved! #Solana\n\n"
             f"Tracked by Avitunde Intelligence 🏛️\n"
@@ -149,7 +149,7 @@ def handle_commands_loop():
                 text = msg.get("text", "")
                 
                 if text == "/start":
-                    send_alert(user_id, "🚀 <b>Avitunde Intelligence V9.0 Active.</b>")
+                    send_alert(user_id, "🚀 <b>Avitunde Intelligence V9.1 Active.</b>")
 
                 elif text == "/health" and user_id == ADMIN_USER_ID:
                     lag = int(time.time() - last_scan_time)
@@ -163,10 +163,9 @@ def handle_commands_loop():
                         send_alert(TELEGRAM_CHAT_ID, "📉 <b>No whale entries in 24H.</b>")
                         continue
 
-                    # Group and Rank
                     rankings = {}
                     for entry in response.data:
-                        m, v = entry['mint'], entry['trigger_vol']
+                        m, v = str(entry['mint']), entry['trigger_vol']
                         rankings[m] = rankings.get(m, 0) + v
                     
                     sorted_list = sorted(rankings.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -175,12 +174,11 @@ def handle_commands_loop():
                         summary += f"{i}. <code>{mint[:4]}...{mint[-4:]}</code>\n💰 Total: <b>{total_vol:,.0f} SOL</b>\n\n"
                     
                     send_alert(TELEGRAM_CHAT_ID, summary)
-
         except: time.sleep(2)
 
 def main():
     global last_scan_time, blocks_scanned
-    print(f"🚀 V9.0 PRODUCTION READY ONLINE", flush=True)
+    print(f"🚀 V9.1 SERIALIZABLE PRODUCTION ONLINE", flush=True)
     threading.Thread(target=handle_commands_loop, daemon=True).start()
     
     last_slot = solana_client.get_slot().value 
