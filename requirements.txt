@@ -3,3 +3,4 @@ solders==0.21.0
 requests
 python-dotenv
 postgrest
+ 
