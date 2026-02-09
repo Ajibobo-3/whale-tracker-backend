@@ -82,14 +82,14 @@ def process_whale_move(tx, diff):
         sender = str(tx.transaction.message.account_keys[0])
         receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
 
-        # --- 1. AUTO-WATCHLIST (Fixed Table Name to 'watchlist') ---
+        # --- 1. AUTO-WATCHLIST (Fixed Column to 'created_at') ---
         if diff >= ALPHA_WATCH_THRESHOLD and hasattr(tx.meta, 'post_token_balances') and tx.meta.post_token_balances:
             mint = str(tx.meta.post_token_balances[0].mint)
             if mint != "So11111111111111111111111111111111111111112":
-                # UPDATED: Changed 'global_watchlist' to 'watchlist'
+                # UPDATED COLUMN: created_at
                 db.table("watchlist").upsert({
                     "mint": mint, 
-                    "added_at": datetime.datetime.now(timezone.utc).isoformat(),
+                    "created_at": datetime.datetime.now(timezone.utc).isoformat(),
                     "trigger_vol": diff
                 }).execute()
                 send_alert(TELEGRAM_CHAT_ID, f"🌟 <b>ALPHA DETECTED</b>\nWhale entered {get_token_name(mint)}.\n🔗 <a href='https://solscan.io/token/{mint}'>Token View</a>")
@@ -100,24 +100,18 @@ def process_whale_move(tx, diff):
         
         if s_known and not r_known:
             signal, icon = "🚀 <b>BULLISH OUTFLOW</b>", "📤"
-            note = "<i>(Accumulation: Moving to cold storage)</i>"
         elif not s_known and r_known:
             signal, icon = "🚨 <b>BEARISH INFLOW</b>", "📥"
-            note = "<i>(Potential Sell: Moving to exchange)</i>"
         else:
             signal, icon = "🕵️ <b>NEUTRAL MOVE</b>", "🔄"
-            note = "<i>(Private wallet transfer)</i>"
 
         # --- 3. VIRAL SHARING ---
         tweet_text = quote(f"🚨 WHALE ALERT: {diff:,.0f} SOL (${usd_val:,.2f}) moved! #Solana")
         twitter_url = f"https://twitter.com/intent/tweet?text={tweet_text}"
 
         # --- 4. TELEGRAM ALERT ---
-        msg = (f"{icon} {signal}\n"
-               f"💰 <b>{diff:,.0f} SOL</b> (${usd_val:,.2f})\n\n"
-               f"📤 <b>From:</b> {s_label}\n"
-               f"📥 <b>To:</b> {r_label}\n"
-               f"📝 {note}\n\n"
+        msg = (f"{icon} {signal}\n💰 <b>{diff:,.0f} SOL</b> (${usd_val:,.2f})\n\n"
+               f"📤 <b>From:</b> {s_label}\n📥 <b>To:</b> {r_label}\n\n"
                f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a>")
         
         send_alert_with_button(TELEGRAM_CHAT_ID, msg, twitter_url, is_loud=(diff >= LOUD_THRESHOLD))
@@ -141,17 +135,14 @@ def handle_commands_loop():
                 user_id = msg.get("from", {}).get("id")
                 text = msg.get("text", "")
                 
-                if text == "/start":
-                    send_alert(user_id, "🚀 <b>Avitunde Intelligence V9.2 Active.</b>")
-
-                elif text == "/health" and user_id == ADMIN_USER_ID:
+                if text == "/health" and user_id == ADMIN_USER_ID:
                     lag = int(time.time() - last_scan_time)
                     send_alert(ADMIN_USER_ID, f"🛡️ Scanner: Active ({lag}s lag)\n🧱 Blocks: {blocks_scanned}")
 
                 elif text == "/topbuy":
                     time_threshold = (datetime.datetime.now(timezone.utc) - datetime.timedelta(hours=24)).isoformat()
-                    # UPDATED: Changed 'global_watchlist' to 'watchlist'
-                    response = db.table("watchlist").select("mint, trigger_vol").gt("added_at", time_threshold).execute()
+                    # UPDATED COLUMN: created_at
+                    response = db.table("watchlist").select("mint, trigger_vol").gt("created_at", time_threshold).execute()
                     
                     if not response.data:
                         send_alert(TELEGRAM_CHAT_ID, "📉 No whale entries in 24H.")
@@ -159,7 +150,7 @@ def handle_commands_loop():
 
                     rankings = {}
                     for entry in response.data:
-                        m, v = str(entry['mint']), entry['trigger_vol']
+                        m, v = entry['mint'], entry['trigger_vol']
                         rankings[m] = rankings.get(m, 0) + v
                     
                     sorted_list = sorted(rankings.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -172,7 +163,7 @@ def handle_commands_loop():
 
 def main():
     global last_scan_time, blocks_scanned
-    print(f"🚀 V9.2 FINAL CONNECTION ONLINE", flush=True)
+    print(f"🚀 V9.3 SCHEMA-SYNC ONLINE", flush=True)
     threading.Thread(target=handle_commands_loop, daemon=True).start()
     
     last_slot = solana_client.get_slot().value 
