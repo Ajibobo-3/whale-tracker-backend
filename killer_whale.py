@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- SETUP ---
-WHALE_THRESHOLD = 0.1 # Very low for testing
+WHALE_THRESHOLD = 0.1  # Set back to 1000 after testing
 LOUD_THRESHOLD = 2500
 ALCHEMY_URL = os.getenv("ALCHEMY_URL")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -26,10 +26,9 @@ last_update_id = 0
 solana_client = Client(ALCHEMY_URL)
 db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
 
-# --- UPDATED UTILITY WITH LOGGING ---
+# --- CORE UTILITY FUNCTIONS ---
 
 def send_alert(chat_id, msg, is_loud=False):
-    """Sends a message and prints any errors to Railway Logs."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "disable_notification": not is_loud}
     try: 
@@ -37,9 +36,7 @@ def send_alert(chat_id, msg, is_loud=False):
         if res.status_code != 200:
             print(f"❌ Telegram Error for {chat_id}: {res.status_code} - {res.text}", flush=True)
         return res
-    except Exception as e: 
-        print(f"❌ Connection Error: {e}", flush=True)
-        return None
+    except: return None
 
 def delete_message(chat_id, message_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
@@ -83,24 +80,28 @@ def handle_commands_loop():
                 
                 if not user_id or not text: continue
 
-                # CLEANUP: Delete group commands
-                if text.startswith("/") and str(chat_id).startswith("-"):
-                    delete_message(chat_id, message_id)
-                    send_alert(user_id, "💡 Please use commands here in private!")
+                # --- 1. ID AUTO-DISCOVERY (GROUP ONLY) ---
+                if text == "/getgroupid":
+                    discovery_msg = (
+                        f"📍 <b>ID Discovery Successful!</b>\n\n"
+                        f"Target Group: <code>{msg.get('chat', {}).get('title', 'Unknown')}</code>\n"
+                        f"Target ID: <code>{chat_id}</code>\n\n"
+                        f"🔑 <b>Action:</b> Paste this ID into your Railway <b>TELEGRAM_CHAT_ID</b>."
+                    )
+                    # Sends ONLY to you privately
+                    send_alert(ADMIN_USER_ID, discovery_msg)
+                    # Removes command from group chat
+                    if str(chat_id).startswith("-"):
+                        delete_message(chat_id, message_id)
 
-                if text == "/start":
-                    send_alert(user_id, "🚀 <b>Omni-Tracker V7.8: Live Debugging Active.</b>")
-
-                # --- NEW ID DISCOVERY COMMAND ---
-                elif text == "/id":
-                    # Type /id in the GROUP to see what the bot thinks the ID is
-                    send_alert(chat_id, f"📍 <b>Chat ID:</b> <code>{chat_id}</code>\n(Paste this into Railway!)")
+                # --- 2. STANDARD COMMANDS ---
+                elif text == "/start":
+                    send_alert(user_id, "🚀 <b>Omni-Tracker V7.9 Online.</b>")
 
                 elif text == "/health" and user_id == ADMIN_USER_ID:
                     scanner_lag = time.time() - last_scan_time
                     scanner_status = "✅ Active" if scanner_lag < 120 else "⚠️ Stalled"
-                    health_msg = f"🛡️ <b>Scanner:</b> {scanner_status} ({int(scanner_lag)}s lag)\n🧱 <b>Blocks:</b> {blocks_scanned:,}"
-                    send_alert(ADMIN_USER_ID, health_msg)
+                    send_alert(ADMIN_USER_ID, f"🛡️ <b>Scanner:</b> {scanner_status}\n👂 <b>Listener:</b> ✅ Active")
 
                 elif text.startswith("/watch "):
                     mint = text.replace("/watch ", "").strip()
@@ -109,12 +110,13 @@ def handle_commands_loop():
                         send_alert(user_id, f"🎯 Monitoring {get_token_name(mint)}")
 
         except Exception as e:
+            print(f"❌ Listener Error: {e}", flush=True)
             time.sleep(2)
 
 # --- THREAD 2: THE SCANNER ---
 def main():
     global last_scan_time, blocks_scanned
-    print(f"🚀 V7.8 ONLINE | Admin: {ADMIN_USER_ID}", flush=True)
+    print(f"🚀 V7.9 ONLINE | Admin: {ADMIN_USER_ID}", flush=True)
     
     cmd_thread = threading.Thread(target=handle_commands_loop, daemon=True)
     cmd_thread.start()
@@ -147,7 +149,6 @@ def main():
                 if diff >= WHALE_THRESHOLD:
                     msg = (f"🕵️ <b>TEST WHALE MOVE</b>\n💰 <b>{diff:,.2f} SOL</b>\n"
                            f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a>")
-                    # SEND TO GROUP
                     send_alert(TELEGRAM_CHAT_ID, msg)
 
             last_slot = slot
