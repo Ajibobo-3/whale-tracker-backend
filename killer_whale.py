@@ -50,7 +50,8 @@ def get_label(addr):
     return f"👤 {label}", is_known
 
 def get_token_name(mint):
-    return f"Token ({str(mint)[:4]})"
+    # Shorten mint for cleaner UI
+    return f"Token ({str(mint)[:4]}...{str(mint)[-4:]})"
 
 def send_alert(chat_id, msg, is_loud=False):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -146,14 +147,40 @@ def handle_commands_loop():
                 msg = update.get("message", {})
                 user_id = msg.get("from", {}).get("id")
                 text = msg.get("text", "")
-                if text == "/health" and user_id == ADMIN_USER_ID:
+                
+                if text == "/start":
+                    send_alert(user_id, "🚀 <b>Avitunde Intelligence V9.0 Active.</b>")
+
+                elif text == "/health" and user_id == ADMIN_USER_ID:
                     lag = int(time.time() - last_scan_time)
                     send_alert(ADMIN_USER_ID, f"🛡️ Scanner active ({lag}s lag)\n🧱 Blocks: {blocks_scanned}")
+
+                elif text == "/topbuy":
+                    time_threshold = (datetime.datetime.now(timezone.utc) - datetime.timedelta(hours=24)).isoformat()
+                    response = db.table("global_watchlist").select("mint, trigger_vol").gt("added_at", time_threshold).execute()
+                    
+                    if not response.data:
+                        send_alert(TELEGRAM_CHAT_ID, "📉 <b>No whale entries in 24H.</b>")
+                        continue
+
+                    # Group and Rank
+                    rankings = {}
+                    for entry in response.data:
+                        m, v = entry['mint'], entry['trigger_vol']
+                        rankings[m] = rankings.get(m, 0) + v
+                    
+                    sorted_list = sorted(rankings.items(), key=lambda x: x[1], reverse=True)[:5]
+                    summary = "🏛️ <b>TOP WHALE ENTRIES (24H)</b>\n\n"
+                    for i, (mint, total_vol) in enumerate(sorted_list, 1):
+                        summary += f"{i}. <code>{mint[:4]}...{mint[-4:]}</code>\n💰 Total: <b>{total_vol:,.0f} SOL</b>\n\n"
+                    
+                    send_alert(TELEGRAM_CHAT_ID, summary)
+
         except: time.sleep(2)
 
 def main():
     global last_scan_time, blocks_scanned
-    print(f"🚀 V8.9 PRODUCTION READY ONLINE", flush=True)
+    print(f"🚀 V9.0 PRODUCTION READY ONLINE", flush=True)
     threading.Thread(target=handle_commands_loop, daemon=True).start()
     
     last_slot = solana_client.get_slot().value 
