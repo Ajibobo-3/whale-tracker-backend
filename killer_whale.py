@@ -42,8 +42,7 @@ def send_alert(msg, is_loud=False):
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML", "disable_notification": not is_loud}
     try:
         requests.post(url, json=payload, timeout=5)
-    except Exception as e:
-        print(f"❌ Telegram Error: {e}")
+    except: pass
 
 def get_token_name(mint):
     try:
@@ -77,89 +76,60 @@ def get_label(addr):
     if addr_str in KNOWN_WALLETS: return KNOWN_WALLETS[addr_str], True
     return f"👤 {addr_str[:4]}...{addr_str[-4:]}", False
 
-# --- COMMANDS ---
-
 def handle_commands():
     global last_update_id
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
         params = {"offset": last_update_id + 1, "timeout": 1}
         res = requests.get(url, params=params, timeout=5).json()
-        
         for update in res.get("result", []):
             last_update_id = update["update_id"]
             msg = update.get("message", {})
             text = msg.get("text", "")
-            
             if text.startswith("/watch "):
                 mint = text.replace("/watch ", "").strip()
-                if len(mint) > 30:
-                    db.table("watchlist").upsert({"mint": mint}).execute()
-                    name = get_token_name(mint)
-                    send_alert(f"🎯 <b>Watchlist Updated:</b> Monitoring {name}")
-            
+                db.table("watchlist").upsert({"mint": mint}).execute()
+                send_alert(f"🎯 <b>Watchlist Updated:</b> Monitoring {get_token_name(mint)}")
             elif text.startswith("/unwatch "):
                 mint = text.replace("/unwatch ", "").strip()
                 db.table("watchlist").delete().eq("mint", mint).execute()
                 send_alert(f"❌ <b>Removed:</b> Stopped monitoring {mint[:4]}...")
-
             elif text == "/list":
                 mints = sync_watchlist()
-                if not mints:
-                    send_alert("📝 <b>Watchlist is empty.</b>")
-                else:
-                    msg = "🎯 <b>Current Watchlist:</b>\n━━━━━━━━━━━━━━\n"
-                    for i, m in enumerate(mints, 1):
-                        msg += f"{i}. {get_token_name(m)} (<code>{m[:6]}...</code>)\n"
-                    send_alert(msg)
-
-            elif text == "/clear":
-                db.table("watchlist").delete().neq("mint", "0").execute()
-                send_alert("🧹 <b>Watchlist Cleared:</b> All monitored coins removed.")
-
+                msg = "🎯 <b>Current Watchlist:</b>\n" + "\n".join([f"- {get_token_name(m)}" for m in mints]) if mints else "📝 Empty"
+                send_alert(msg)
             elif text == "/help":
-                help_text = (
-                    "🛠️ <b>Omni-Tracker Intelligence v6.8</b>\n"
-                    "━━━━━━━━━━━━━━\n"
-                    "🎯 <code>/watch [mint]</code> - Add coin\n"
-                    "❌ <code>/unwatch [mint]</code> - Remove coin\n"
-                    "📝 <code>/list</code> - Show active list\n"
-                    "🧹 <code>/clear</code> - Wipe all coins\n"
-                    "💡 <i>Whale alerts (1k+ SOL) are automatic.</i>"
-                )
-                send_alert(help_text)
+                send_alert("🛠️ <b>V6.8 Commands:</b> /watch, /unwatch, /list, /clear")
     except: pass
 
 # --- MAIN LOOP ---
 
 def main():
-    print("🚀 V6.8 OMNI-TRACKER: FULL INTEL ACTIVE", flush=True)
+    print("🚀 V6.8 OMNI-TRACKER ONLINE", flush=True)
     last_slot = solana_client.get_slot().value - 1
 
     while True:
         handle_commands()
         watched_memes = sync_watchlist()
-        
         try:
             slot = solana_client.get_slot().value
             if slot <= last_slot:
                 time.sleep(1)
                 continue
-            
             block = solana_client.get_block(slot, encoding="jsonParsed", max_supported_transaction_version=0).value
             if not block or not block.transactions:
                 last_slot = slot
                 continue
-
             current_price = get_live_sol_price()
 
             for tx in block.transactions:
                 if not tx.meta or tx.meta.err: continue
-                
                 diff = abs(tx.meta.pre_balances[0] - tx.meta.post_balances[0]) / 10**9
                 usd_val = diff * current_price
+                sig = str(tx.transaction.signatures[0])
+                sender = str(tx.transaction.message.account_keys[0])
 
-                # Scan for Watchlist
+                # --- SCAN FOR WATCHLIST ---
                 mint = None
                 is_watched = False
                 if tx.meta.post_token_balances:
@@ -170,36 +140,33 @@ def main():
                             break
 
                 if is_watched:
-                    name = get_token_name(mint)
-                    msg = (f"🎯 <b>WATCHLIST ALERT: {name}</b>\n"
+                    msg = (f"🎯 <b>WATCHLIST ALERT: {get_token_name(mint)}</b>\n"
                            f"━━━━━━━━━━━━━━\n"
                            f"💰 <b>Value:</b> {diff:,.2f} SOL (<b>${usd_val:,.2f}</b>)\n"
-                           f"🔗 <a href='https://solscan.io/tx/{tx.transaction.signatures[0]}'>View Tx</a>")
+                           f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a> | <a href='https://app.bubblemaps.io/sol/address/{sender}'>Maps</a>")
                     send_alert(msg, is_loud=True)
                     continue
 
                 if diff >= WHALE_THRESHOLD:
-                    sender = str(tx.transaction.message.account_keys[0])
                     receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
                     s_label, s_is_known = get_label(sender)
                     r_label, r_is_known = get_label(receiver)
+                    icon = "📥" if r_is_known else ("📤" if s_is_known else "🕵️")
+                    title = "EXCHANGE INFLOW" if r_is_known else ("EXCHANGE OUTFLOW" if s_is_known else "PRIVATE TRANSFER")
 
-                    if r_is_known and not s_is_known:
-                        icon, title = "📥", "EXCHANGE INFLOW"
-                    elif s_is_known and not r_is_known:
-                        icon, title = "📤", "EXCHANGE OUTFLOW"
-                    else:
-                        icon, title = "🕵️", "PRIVATE TRANSFER"
-
-                    msg = (f"{icon} <b>{title}</b>\n━━━━━━━━━━━━━━\n"
+                    msg = (f"{icon} <b>{title}</b>\n"
+                           f"━━━━━━━━━━━━━━\n"
                            f"💰 <b>{diff:,.0f} SOL</b> (<b>${usd_val:,.2f}</b>)\n"
                            f"📤 <b>From:</b> {s_label}\n"
-                           f"📥 <b>To:</b> {r_label}")
+                           f"📥 <b>To:</b> {r_label}\n"
+                           f"━━━━━━━━━━━━━━\n"
+                           f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a> | "
+                           f"<a href='https://app.bubblemaps.io/sol/address/{sender}'>Maps</a> | "
+                           f"<a href='https://platform.arkhamintelligence.com/explorer/address/{sender}'>Arkham</a>")
                     send_alert(msg, is_loud=(diff >= LOUD_THRESHOLD))
 
             last_slot = slot
-        except Exception as e:
-            time.sleep(1)
+        except: time.sleep(1)
 
 if __name__ == "__main__":
     main()
