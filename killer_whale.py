@@ -47,14 +47,21 @@ last_update_id = 0
 # --- 4. UTILITY FUNCTIONS ---
 
 def get_live_prices(mints):
-    """Fetches batch pricing from Jupiter API V3."""
+    """Hardened V9.9: Uses Jupiter V2 for stable real-time pricing."""
     try:
-        ids = ",".join(mints)
-        url = f"https://api.jup.ag/price/v3?ids={ids}"
+        clean_mints = [str(m) for m in mints if m]
+        ids = ",".join(clean_mints)
+        url = f"https://api.jup.ag/price/v2?ids={ids}"
         res = requests.get(url, timeout=5).json()
-        return {mint: float(data['usdPrice']) for mint, data in res['data'].items() if data}
+        
+        prices = {}
+        if 'data' in res:
+            for mint, data in res['data'].items():
+                if data and 'price' in data:
+                    prices[mint] = float(data['price'])
+        return prices
     except Exception as e:
-        print(f"⚠️ Pricing Error: {e}")
+        print(f"⚠️ Market Data Error: {e}")
         return {}
 
 def get_label(addr):
@@ -70,7 +77,6 @@ def get_token_info(mint):
     return f"Token ({mint_str[:4]}...{mint_str[-4:]})"
 
 def identify_dex(tx):
-    """Parses program IDs to identify the swap platform."""
     account_keys = [str(k) for k in tx.transaction.message.account_keys]
     for p_id, name in DEX_MAP.items():
         if p_id in account_keys:
@@ -87,11 +93,7 @@ def send_alert_with_button(chat_id, msg, twitter_link, is_loud=False):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     keyboard = {"inline_keyboard": [[{"text": "🐦 Share on X", "url": twitter_link}]]}
     payload = {
-        "chat_id": chat_id, 
-        "text": msg, 
-        "parse_mode": "HTML", 
-        "reply_markup": keyboard, 
-        "disable_notification": not is_loud
+        "chat_id": chat_id, "text": msg, "parse_mode": "HTML", "reply_markup": keyboard, "disable_notification": not is_loud
     }
     try: requests.post(url, json=payload, timeout=8)
     except: pass
@@ -102,27 +104,40 @@ def process_whale_move(tx, diff):
     try:
         sig = str(tx.transaction.signatures[0])
         dex_name = identify_dex(tx)
+        sender = str(tx.transaction.message.account_keys[0])
         
-        # 1. Price Context
-        mints_to_fetch = ["So11111111111111111111111111111111111111112"]
+        # 1. Price Context (Dynamic Fetch)
+        sol_mint = "So11111111111111111111111111111111111111112"
+        mints_to_fetch = [sol_mint]
         if hasattr(tx.meta, 'post_token_balances'):
             for b in tx.meta.post_token_balances:
                 mints_to_fetch.append(str(b.mint))
         
         prices = get_live_prices(list(set(mints_to_fetch)))
-        sol_price = prices.get("So11111111111111111111111111111111111111112", 110.00)
+        sol_price = prices.get(sol_mint)
+        
+        if not sol_price:
+            print(f"📉 Skip: Price data missing for {sig}")
+            return
+
         usd_val = diff * sol_price
 
-        # 2. Alpha Detected Logic
-        if diff >= ALPHA_WATCH_THRESHOLD and hasattr(tx.meta, 'post_token_balances'):
-            for balance in tx.meta.post_token_balances:
-                mint = str(balance.mint)
-                if mint != "So11111111111111111111111111111111111111112":
-                    token_amount = balance.ui_token_amount.ui_amount or 0
+        # 2. Precision Alpha Logic (Net Delta)
+        if diff >= ALPHA_WATCH_THRESHOLD and hasattr(tx.meta, 'post_token_balances') and hasattr(tx.meta, 'pre_token_balances'):
+            pre_map = {str(b.mint): (b.ui_token_amount.ui_amount or 0) for b in tx.meta.pre_token_balances}
+            
+            for post in tx.meta.post_token_balances:
+                mint = str(post.mint)
+                if mint == sol_mint: continue 
+                
+                post_amount = post.ui_token_amount.ui_amount or 0
+                pre_amount = pre_map.get(mint, 0)
+                received = post_amount - pre_amount
+                
+                if received > 0.0001: 
                     token_label = get_token_info(mint)
-                    token_usd_price = prices.get(mint)
+                    token_price = prices.get(mint)
                     
-                    # Store in Supabase
                     db.table("watchlist").upsert({
                         "mint": mint, 
                         "created_at": datetime.datetime.now(timezone.utc).isoformat(),
@@ -130,19 +145,20 @@ def process_whale_move(tx, diff):
                     }).execute()
                     
                     alpha_msg = (f"🏛️ <b>DEX: {dex_name}</b>\n"
-                                 f"🌟 <b>ALPHA DETECTED</b>\n"
-                                 f"Whale swapped <b>{diff:,.1f} SOL</b> (${usd_val:,.2f})\n"
-                                 f"Received: <b>{token_amount:,.2f} {token_label}</b>")
+                                 f"🌟 <b>ALPHA DETECTED</b>\n\n"
+                                 f"💰 <b>Swap Detail:</b>\n"
+                                 f"Whale sent: <b>{diff:,.1f} SOL</b> (${usd_val:,.2f})\n"
+                                 f"Whale received: <b>{received:,.2f} {token_label}</b>")
                     
-                    if token_usd_price:
-                        alpha_msg += f"\nValue: <b>${(token_amount * token_usd_price):,.2f}</b>"
+                    if token_price:
+                        alpha_msg += f"\nEst. Value: <b>${(received * token_price):,.2f}</b>"
                     
-                    alpha_msg += f"\n\n🔗 <a href='https://solscan.io/token/{mint}'>Token View</a>"
+                    alpha_msg += (f"\n\n🔗 <a href='https://solscan.io/token/{mint}'>Token View</a> | "
+                                  f"<a href='https://arkhamintelligence.com/explorer/address/{sender}'>Arkham Explorer</a>")
                     send_alert(TELEGRAM_CHAT_ID, alpha_msg)
                     break 
 
         # 3. Standard Whale Alert
-        sender = str(tx.transaction.message.account_keys[0])
         receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
         s_label, s_known = get_label(sender)
         r_label, r_known = get_label(receiver)
@@ -153,20 +169,21 @@ def process_whale_move(tx, diff):
         msg = (f"{icon} <b>{signal}</b>\n💰 <b>{diff:,.0f} SOL</b> (${usd_val:,.2f})\n\n"
                f"📤 <b>From:</b> {s_label}\n📥 <b>To:</b> {r_label}\n\n"
                f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a> | "
+               f"<a href='https://arkhamintelligence.com/explorer/address/{sender}'>Arkham Intelligence</a> | "
                f"<a href='https://bubblemaps.io/solana/token/{sender}'>BubbleMaps</a>")
         
-        tweet_text = quote(f"🚨 WHALE ALERT: {diff:,.0f} SOL (${usd_val:,.2f}) moved! #Solana")
+        tweet_text = quote(f"🚨 WhaleMatrix Alert: {diff:,.0f} SOL moved! #Solana #WhaleMatrix #Alpha")
         twitter_link = f"https://twitter.com/intent/tweet?text={tweet_text}"
         send_alert_with_button(TELEGRAM_CHAT_ID, msg, twitter_link, is_loud=(diff >= LOUD_THRESHOLD))
 
     except Exception as e:
         print(f"❌ Error in process_whale_move: {e}", flush=True)
 
-# --- 6. THE COMMAND LISTENER THREAD ---
+# --- 6. THE COMMAND LISTENER ---
 
 def handle_commands_loop():
     global last_update_id, last_scan_time
-    print("👂 Command Listener Active", flush=True)
+    print("👂 WhaleMatrix Listener Active", flush=True)
     while True:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
@@ -185,29 +202,25 @@ def handle_commands_loop():
                 elif text == "/topbuy":
                     time_threshold = (datetime.datetime.now(timezone.utc) - datetime.timedelta(hours=24)).isoformat()
                     response = db.table("watchlist").select("mint, trigger_vol").gt("created_at", time_threshold).execute()
-                    
-                    if not response.data:
-                        send_alert(TELEGRAM_CHAT_ID, "📉 No whale entries in 24H.")
-                        continue
-
-                    rankings = {}
-                    for entry in response.data:
-                        m, v = entry['mint'], entry['trigger_vol']
-                        rankings[m] = rankings.get(m, 0) + v
-                    
-                    sorted_list = sorted(rankings.items(), key=lambda x: x[1], reverse=True)[:5]
-                    summary = "🏛️ <b>TOP WHALE ENTRIES (24H)</b>\n\n"
-                    for i, (mint, total_vol) in enumerate(sorted_list, 1):
-                        summary += f"{i}. <code>{mint[:4]}...</code>\n💰 Total Vol: <b>{total_vol:,.0f} SOL</b>\n\n"
-                    
-                    send_alert(TELEGRAM_CHAT_ID, summary)
+                    if response.data:
+                        rankings = {}
+                        for entry in response.data:
+                            m, v = entry['mint'], entry['trigger_vol']
+                            rankings[m] = rankings.get(m, 0) + v
+                        sorted_list = sorted(rankings.items(), key=lambda x: x[1], reverse=True)[:5]
+                        summary = "🏛️ <b>TOP WHALE ENTRIES (24H)</b>\n\n"
+                        for i, (mint, total_vol) in enumerate(sorted_list, 1):
+                            summary += f"{i}. <code>{mint[:4]}...</code>\n💰 Vol: <b>{total_vol:,.0f} SOL</b>\n\n"
+                        send_alert(TELEGRAM_CHAT_ID, summary)
+                    else:
+                        send_alert(TELEGRAM_CHAT_ID, "📉 No data in 24H.")
         except: time.sleep(2)
 
-# --- 7. THE MAIN SCANNER LOOP ---
+# --- 7. MAIN SCANNER ---
 
 def main():
     global last_scan_time, blocks_scanned
-    print(f"🚀 V9.7 FULL KRAKEN PRODUCTION ONLINE", flush=True)
+    print(f"🚀 WhaleMatrix V9.9.5 PRODUCTION ONLINE", flush=True)
     threading.Thread(target=handle_commands_loop, daemon=True).start()
     
     last_slot = solana_client.get_slot().value 
@@ -218,7 +231,6 @@ def main():
             if current_slot <= last_slot:
                 time.sleep(0.2); continue
             
-            # Use jsonParsed for detailed token balance extraction
             block_data = solana_client.get_block(current_slot, encoding="jsonParsed", max_supported_transaction_version=0)
             block = block_data.value
             if not block or not block.transactions:
@@ -230,7 +242,6 @@ def main():
             for tx in block.transactions:
                 try:
                     if not tx.meta or tx.meta.err: continue
-                    # Absolute SOL difference
                     diff = abs(tx.meta.pre_balances[0] - tx.meta.post_balances[0]) / 10**9
                     if diff >= WHALE_THRESHOLD:
                         process_whale_move(tx, diff)
@@ -238,7 +249,7 @@ def main():
 
             last_slot = current_slot
         except Exception as e:
-            print(f"⚠️ Scanner Restart: {e}")
+            print(f"⚠️ Restarting: {e}")
             time.sleep(1)
 
 if __name__ == "__main__":
