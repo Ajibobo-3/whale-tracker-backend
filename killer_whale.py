@@ -51,6 +51,8 @@ def get_label(addr):
 
 def get_token_name(mint):
     mint_str = str(mint)
+    # Check for USDC specifically for your request
+    if mint_str == "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": return "USDC"
     return f"Token ({mint_str[:4]}...{mint_str[-4:]})"
 
 def send_alert(chat_id, msg, is_loud=False):
@@ -82,19 +84,31 @@ def process_whale_move(tx, diff):
         sender = str(tx.transaction.message.account_keys[0])
         receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
 
-        # --- AUTO-WATCHLIST (Configured for trigger_vol) ---
+        # --- 1. DETAILED ALPHA DETECTION ---
         if diff >= ALPHA_WATCH_THRESHOLD and hasattr(tx.meta, 'post_token_balances') and tx.meta.post_token_balances:
-            mint = str(tx.meta.post_token_balances[0].mint)
-            if mint != "So11111111111111111111111111111111111111112":
-                # Ensure keys match your Supabase columns: mint, created_at, trigger_vol
-                db.table("watchlist").upsert({
-                    "mint": mint, 
-                    "created_at": datetime.datetime.now(timezone.utc).isoformat(),
-                    "trigger_vol": diff  # <-- Matches the column you are adding
-                }).execute()
-                send_alert(TELEGRAM_CHAT_ID, f"🌟 <b>ALPHA DETECTED</b>\nWhale entered {get_token_name(mint)}.\n🔗 <a href='https://solscan.io/token/{mint}'>Token View</a>")
+            # Find the token involved in the swap
+            for balance in tx.meta.post_token_balances:
+                mint = str(balance.mint)
+                # Ignore Wrapped SOL mint
+                if mint != "So11111111111111111111111111111111111111112":
+                    token_amount = balance.ui_token_amount.ui_amount or 0
+                    token_label = get_token_name(mint)
+                    
+                    # Update database
+                    db.table("watchlist").upsert({
+                        "mint": mint, 
+                        "created_at": datetime.datetime.now(timezone.utc).isoformat(),
+                        "trigger_vol": diff
+                    }).execute()
+                    
+                    # Detailed Alpha Message
+                    alpha_msg = (f"🌟 <b>ALPHA DETECTED</b>\n"
+                                 f"Whale swapped <b>{diff:,.0f} SOL</b> for <b>{token_amount:,.2f} {token_label}</b>\n"
+                                 f"🔗 <a href='https://solscan.io/token/{mint}'>Token View</a>")
+                    send_alert(TELEGRAM_CHAT_ID, alpha_msg)
+                    break # Only alert for the first relevant token found
 
-        # --- SIGNAL INTELLIGENCE ---
+        # --- 2. SIGNAL INTELLIGENCE (Whale Movement) ---
         s_label, s_known = get_label(sender)
         r_label, r_known = get_label(receiver)
         
@@ -139,7 +153,6 @@ def handle_commands_loop():
 
                 elif text == "/topbuy":
                     time_threshold = (datetime.datetime.now(timezone.utc) - datetime.timedelta(hours=24)).isoformat()
-                    # Updated query to use trigger_vol and created_at
                     response = db.table("watchlist").select("mint, trigger_vol").gt("created_at", time_threshold).execute()
                     
                     if not response.data:
@@ -161,7 +174,7 @@ def handle_commands_loop():
 
 def main():
     global last_scan_time, blocks_scanned
-    print(f"🚀 V9.4 SCHEMA-STABLE ONLINE", flush=True)
+    print(f"🚀 V9.5 DETAILED ALPHA ONLINE", flush=True)
     threading.Thread(target=handle_commands_loop, daemon=True).start()
     
     last_slot = solana_client.get_slot().value 
