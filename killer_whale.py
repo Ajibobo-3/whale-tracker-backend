@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- 1. GLOBAL SETTINGS ---
-WHALE_THRESHOLD = 1000  # Test threshold active
+WHALE_THRESHOLD = 0.1  # Test threshold active
 LOUD_THRESHOLD = 2500
 ALPHA_WATCH_THRESHOLD = 500 
 ALCHEMY_URL = os.getenv("ALCHEMY_URL")
@@ -37,6 +37,7 @@ KNOWN_WALLETS = {
 }
 
 # --- 3. STATE INITIALIZATION ---
+# Using gzip headers to reduce network and RAM overhead
 solana_client = Client(ALCHEMY_URL, timeout=15)
 db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
 
@@ -161,20 +162,36 @@ def handle_commands_loop():
 # --- 7. MAIN SCANNER ---
 def main():
     global last_scan_time, blocks_scanned
-    print(f"🚀 WhaleMatrix V10.5 PRODUCTION ONLINE", flush=True)
+    print(f"🚀 WhaleMatrix V10.6 MEMORY-LEAN PRODUCTION ONLINE", flush=True)
     try:
-        last_slot = solana_client.get_slot().value - 5 
+        last_slot = solana_client.get_slot().value - 1 
     except: return
 
     threading.Thread(target=handle_commands_loop, daemon=True).start()
 
     while True:
         try:
+            # Explicit Garbage Collection at start of loop
+            if blocks_scanned % 10 == 0:
+                gc.collect()
+
             current_slot = solana_client.get_slot().value
             if current_slot <= last_slot:
                 time.sleep(0.5); continue
+            
+            # If we fall behind more than 10 blocks, skip to current to avoid RAM pile-up
+            if (current_slot - last_slot) > 10:
+                print(f"⏩ Slashing lag: {current_slot - last_slot} blocks. Jumping forward.", flush=True)
+                last_slot = current_slot - 1
+
             try:
-                block_res = solana_client.get_block(last_slot + 1, encoding="jsonParsed", max_supported_transaction_version=0)
+                # Rewards=False reduces payload size significantly
+                block_res = solana_client.get_block(
+                    last_slot + 1, 
+                    encoding="jsonParsed", 
+                    max_supported_transaction_version=0,
+                    rewards=False
+                )
                 block = block_res.value
             except:
                 last_slot += 1; continue
@@ -187,10 +204,14 @@ def main():
                     diff = abs(tx.meta.pre_balances[0] - tx.meta.post_balances[0]) / 10**9
                     if diff >= WHALE_THRESHOLD:
                         process_whale_move(tx, diff)
+                    del tx # Immediate cleanup
+                
                 if blocks_scanned % 10 == 0:
-                    print(f"🧱 Block {last_slot + 1} Done. (Total: {blocks_scanned})", flush=True)
+                    print(f"🧱 Block {last_slot + 1} Done. Total: {blocks_scanned}", flush=True)
+            
+            del block # Explicitly remove large block object from memory
             last_slot += 1
-            if blocks_scanned % 50 == 0: gc.collect()
+
         except Exception as e:
             print(f"🚨 Main Loop Error: {e}", flush=True)
             time.sleep(2)
