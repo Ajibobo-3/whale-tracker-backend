@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- 1. GLOBAL SETTINGS ---
-WHALE_THRESHOLD = 0.1  
+WHALE_THRESHOLD = 0.1  # Keeping your test threshold
 LOUD_THRESHOLD = 2500
 ALPHA_WATCH_THRESHOLD = 500 
 ALCHEMY_URL = os.getenv("ALCHEMY_URL")
@@ -18,26 +18,9 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") 
 ADMIN_USER_ID = 7302870957 
 
-# --- 2. MAPPINGS & DATA ---
-DEX_MAP = {
-    "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4": "Jupiter V6",
-    "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB": "Jupiter V4",
-    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8": "Raydium V4",
-    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK": "Raydium CLMM",
-    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc": "Orca Whirlpool",
-    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P": "Pump.fun",
-    "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB": "Meteora Pools",
-    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo": "Meteora DLMM"
-}
-
-KNOWN_WALLETS = {
-    "H88yS9KmYvM9B6NSpYXzAn8f2g5tY0eD": "Binance Hot Wallet",
-    "9WzDXwBsQXds2Wz9C66C3uEt1XUvXn2J": "Binance Cold Storage",
-    "JUP6LkbZbjS1jKKccS4n14C9G98zK": "Jupiter Aggregator"
-}
-
 # --- 3. STATE INITIALIZATION ---
-solana_client = Client(ALCHEMY_URL)
+# Add a timeout to prevent the bot from hanging on slow blocks
+solana_client = Client(ALCHEMY_URL, timeout=15)
 db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
 
 last_scan_time = time.time()
@@ -47,6 +30,7 @@ last_update_id = 0
 # --- 4. UTILITY FUNCTIONS ---
 
 def get_live_prices(mints):
+    """V10.4: Direct Jupiter V2 pricing with timeout protection."""
     try:
         clean_mints = [str(m) for m in mints if m]
         ids = ",".join(clean_mints)
@@ -59,8 +43,7 @@ def get_live_prices(mints):
                 if data and 'price' in data:
                     prices[mint] = float(data['price'])
         return prices
-    except Exception as e:
-        print(f"⚠️ Market Data Error: {e}", flush=True)
+    except:
         return {}
 
 def get_label(addr):
@@ -76,16 +59,25 @@ def get_token_info(mint):
     return f"Token ({mint_str[:4]}...{mint_str[-4:]})"
 
 def identify_dex(tx):
-    account_keys = [str(k) for k in tx.transaction.message.account_keys]
+    # Using 'jsonParsed' or 'json' accounts
+    account_keys = []
+    if hasattr(tx.transaction, 'message') and hasattr(tx.transaction.message, 'account_keys'):
+        account_keys = [str(k) for k in tx.transaction.message.account_keys]
+    
     for p_id, name in DEX_MAP.items():
         if p_id in account_keys:
             return name
     return "Private/DEX"
 
 def send_alert(chat_id, msg, is_loud=False):
+    """Rate-limit friendly alert sender."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "disable_notification": not is_loud}
-    try: requests.post(url, json=payload, timeout=8)
+    try: 
+        res = requests.post(url, json=payload, timeout=8)
+        if res.status_code == 429:
+            print("⏳ Telegram Rate Limit. Sleeping 5s...", flush=True)
+            time.sleep(5)
     except: pass
 
 def send_alert_with_button(chat_id, msg, twitter_link, is_loud=False):
@@ -105,10 +97,10 @@ def process_whale_move(tx, diff):
         dex_name = identify_dex(tx)
         sender = str(tx.transaction.message.account_keys[0])
         
-        # 1. Hybrid Price Context
+        # 1. Price Context
         sol_mint = "So11111111111111111111111111111111111111112"
         mints_to_fetch = [sol_mint]
-        if hasattr(tx.meta, 'post_token_balances'):
+        if hasattr(tx.meta, 'post_token_balances') and tx.meta.post_token_balances:
             for b in tx.meta.post_token_balances:
                 mints_to_fetch.append(str(b.mint))
         
@@ -116,9 +108,9 @@ def process_whale_move(tx, diff):
         sol_price = prices.get(sol_mint, 87.84) 
         usd_val = diff * sol_price
 
-        # 2. Precision Alpha Logic (Net Delta)
-        if diff >= ALPHA_WATCH_THRESHOLD and hasattr(tx.meta, 'post_token_balances') and hasattr(tx.meta, 'pre_token_balances'):
-            pre_map = {str(b.mint): (b.ui_token_amount.ui_amount or 0) for b in tx.meta.pre_token_balances}
+        # 2. Alpha Detected Logic (Only for swaps > 500 SOL)
+        if diff >= ALPHA_WATCH_THRESHOLD and hasattr(tx.meta, 'post_token_balances'):
+            pre_map = {str(b.mint): (b.ui_token_amount.ui_amount or 0) for b in tx.meta.pre_token_balances} if hasattr(tx.meta, 'pre_token_balances') else {}
             
             for post in tx.meta.post_token_balances:
                 mint = str(post.mint)
@@ -140,98 +132,58 @@ def process_whale_move(tx, diff):
                     
                     alpha_msg = (f"🏛️ <b>DEX: {dex_name}</b>\n"
                                  f"🌟 <b>ALPHA DETECTED</b>\n\n"
-                                 f"💰 <b>Swap Detail:</b>\n"
-                                 f"Whale sent: <b>{diff:,.1f} SOL</b> (${usd_val:,.2f})\n"
-                                 f"Whale received: <b>{received:,.2f} {token_label}</b>")
+                                 f"Whale sent: <b>{diff:,.1f} SOL</b>\n"
+                                 f"Received: <b>{received:,.2f} {token_label}</b>")
                     
                     if token_price:
-                        alpha_msg += f"\nEst. Value: <b>${(received * token_price):,.2f}</b>"
-                    else:
-                        alpha_msg += f"\nEst. Value: <b>[New Token - Price Pending]</b>"
+                        alpha_msg += f"\nValue: <b>${(received * token_price):,.2f}</b>"
                     
-                    alpha_msg += (f"\n\n🔗 <a href='https://solscan.io/token/{mint}'>Token View</a> | "
-                                  f"<a href='https://arkhamintelligence.com/explorer/address/{sender}'>Arkham Explorer</a>")
+                    alpha_msg += f"\n\n🔗 <a href='https://solscan.io/token/{mint}'>View</a>"
                     send_alert(TELEGRAM_CHAT_ID, alpha_msg)
-                    break 
+                    return # Exit after one alpha found per tx
 
-        # 3. Standard Whale Alert
-        receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
-        s_label, s_known = get_label(sender)
-        r_label, r_known = get_label(receiver)
+        # 3. Standard Alert (If no alpha found, send standard)
+        s_label, _ = get_label(sender)
+        msg = (f"🔄 <b>WHALE MOVE</b>\n💰 <b>{diff:,.2f} SOL</b> (${usd_val:,.2f})\n\n"
+               f"📤 <b>From:</b> {s_label}\n"
+               f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a>")
         
-        icon = "📤" if s_known and not r_known else "📥" if not s_known and r_known else "🔄"
-        signal = "🚀 BULLISH OUTFLOW" if icon == "📤" else "🚨 BEARISH INFLOW" if icon == "📥" else "🕵️ NEUTRAL MOVE"
-
-        msg = (f"{icon} <b>{signal}</b>\n💰 <b>{diff:,.0f} SOL</b> (${usd_val:,.2f})\n\n"
-               f"📤 <b>From:</b> {s_label}\n📥 <b>To:</b> {r_label}\n\n"
-               f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a> | "
-               f"<a href='https://arkhamintelligence.com/explorer/address/{sender}'>Arkham Intelligence</a>")
-        
-        tweet_text = quote(f"🚨 WhaleMatrix Alert: {diff:,.0f} SOL moved! #Solana #WhaleMatrix #Alpha")
+        tweet_text = quote(f"🚨 {diff:,.0f} SOL moved! #WhaleMatrix")
         twitter_link = f"https://twitter.com/intent/tweet?text={tweet_text}"
-        send_alert_with_button(TELEGRAM_CHAT_ID, msg, twitter_link, is_loud=(diff >= LOUD_THRESHOLD))
+        send_alert_with_button(TELEGRAM_CHAT_ID, msg, twitter_link)
 
     except Exception as e:
-        print(f"❌ Error in process_whale_move: {e}", flush=True)
+        print(f"❌ Alert Error: {e}", flush=True)
 
-# --- 6. THE COMMAND LISTENER ---
-
+# --- 6. COMMANDS ---
 def handle_commands_loop():
     global last_update_id, last_scan_time, blocks_scanned
-    print("👂 WhaleMatrix Listener Active", flush=True)
+    print("👂 Command Listener Active", flush=True)
     while True:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
             params = {"offset": last_update_id + 1, "timeout": 10}
             res = requests.get(url, params=params, timeout=15).json()
-            
             for update in res.get("result", []):
                 last_update_id = update["update_id"]
                 msg = update.get("message", {})
-                user_id = msg.get("from", {}).get("id")
-                text = msg.get("text", "")
-                
-                if text == "/health" and user_id == ADMIN_USER_ID:
+                if msg.get("text") == "/health" and msg.get("from", {}).get("id") == ADMIN_USER_ID:
                     lag = int(time.time() - last_scan_time)
                     send_alert(ADMIN_USER_ID, f"🛡️ Scanner: Active ({lag}s lag)\n🧱 Blocks: {blocks_scanned}")
-
-                elif text == "/topbuy":
-                    time_threshold = (datetime.datetime.now(timezone.utc) - datetime.timedelta(hours=24)).isoformat()
-                    response = db.table("watchlist").select("mint, trigger_vol").gt("created_at", time_threshold).execute()
-                    
-                    if response.data:
-                        rankings = {}
-                        for entry in response.data:
-                            m, v = entry['mint'], entry['trigger_vol']
-                            rankings[m] = rankings.get(m, 0) + v
-                        
-                        sorted_list = sorted(rankings.items(), key=lambda x: x[1], reverse=True)[:5]
-                        summary = "🏛️ <b>TOP WHALE ENTRIES (24H)</b>\n\n"
-                        for i, (mint, total_vol) in enumerate(sorted_list, 1):
-                            summary += f"{i}. <code>{mint[:4]}...</code>\n💰 Vol: <b>{total_vol:,.0f} SOL</b>\n\n"
-                        send_alert(TELEGRAM_CHAT_ID, summary)
-                    else:
-                        send_alert(TELEGRAM_CHAT_ID, "📉 No data in 24H.")
-        except Exception as e:
-            print(f"⚠️ Listener Error: {e}", flush=True)
-            time.sleep(5)
+        except: time.sleep(5)
 
 # --- 7. MAIN SCANNER ---
-
 def main():
     global last_scan_time, blocks_scanned
-    print(f"🚀 WhaleMatrix V10.2 RESILIENT ONLINE", flush=True)
+    print(f"🚀 WhaleMatrix V10.4 TURBO ONLINE", flush=True)
     
-    # 1. Pre-spawn Connection Check
+    # 1. Start behind the tip to ensure data is available
     try:
-        current_slot = solana_client.get_slot().value
-        print(f"🔗 RPC Connection Verified. Slot: {current_slot}", flush=True)
-    except Exception as e:
-        print(f"🚨 CRITICAL RPC FAILURE: {e}. Check ALCHEMY_URL.", flush=True)
+        last_slot = solana_client.get_slot().value - 5 
+    except:
         return
 
     threading.Thread(target=handle_commands_loop, daemon=True).start()
-    last_slot = current_slot
 
     while True:
         try:
@@ -239,30 +191,31 @@ def main():
             if current_slot <= last_slot:
                 time.sleep(0.5); continue
             
-            block_data = solana_client.get_block(current_slot, encoding="jsonParsed", max_supported_transaction_version=0)
-            block = block_data.value
-            
-            if not block or not block.transactions:
-                last_slot = current_slot; continue
-            
-            last_scan_time = time.time()
-            blocks_scanned += 1
+            # Fetch with 'jsonParsed' but wrap in timeout
+            try:
+                block_res = solana_client.get_block(last_slot + 1, encoding="jsonParsed", max_supported_transaction_version=0)
+                block = block_res.value
+            except:
+                print(f"⏩ Timeout Slot {last_slot + 1}", flush=True)
+                last_slot += 1; continue
 
-            # Forced memory cleanup
-            if blocks_scanned % 50 == 0:
-                gc.collect()
-
-            for tx in block.transactions:
-                try:
+            if block and block.transactions:
+                last_scan_time = time.time()
+                blocks_scanned += 1
+                for tx in block.transactions:
                     if not tx.meta or tx.meta.err: continue
                     diff = abs(tx.meta.pre_balances[0] - tx.meta.post_balances[0]) / 10**9
                     if diff >= WHALE_THRESHOLD:
                         process_whale_move(tx, diff)
-                except: continue 
+                
+                if blocks_scanned % 10 == 0:
+                    print(f"🧱 Block {last_slot + 1} Done. (Total: {blocks_scanned})", flush=True)
+            
+            last_slot += 1
+            if blocks_scanned % 50 == 0: gc.collect()
 
-            last_slot = current_slot
         except Exception as e:
-            print(f"🚨 Scanner Restating: {e}", flush=True)
+            print(f"🚨 Main Loop Error: {e}", flush=True)
             time.sleep(2)
 
 if __name__ == "__main__":
