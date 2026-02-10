@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- 1. GLOBAL SETTINGS ---
-WHALE_THRESHOLD = 0.1  # Test threshold active
+WHALE_THRESHOLD = 1000  # Test threshold active
 LOUD_THRESHOLD = 2500
 ALPHA_WATCH_THRESHOLD = 500 
 ALCHEMY_URL = os.getenv("ALCHEMY_URL")
