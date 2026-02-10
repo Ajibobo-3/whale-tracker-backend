@@ -22,7 +22,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") 
 ADMIN_USER_ID = 7302870957 
 
-# --- 2. MAPPINGS & DATA (RESTORED FULL) ---
+# --- 2. MAPPINGS & DATA (FULL RESTORE) ---
 DEX_MAP = {
     "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4": "Jupiter V6",
     "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB": "Jupiter V4",
@@ -43,8 +43,9 @@ KNOWN_WALLETS = {
 }
 
 # --- 3. STATE INITIALIZATION ---
-primary_client = Client(ALCHEMY_URL, timeout=12)
-fallback_client = Client(FALLBACK_RPC_URL, timeout=12) if FALLBACK_RPC_URL else None
+# Commitment 'confirmed' is essential for real-time scanning
+primary_client = Client(ALCHEMY_URL, timeout=12, commitment="confirmed")
+fallback_client = Client(FALLBACK_RPC_URL, timeout=12, commitment="confirmed") if FALLBACK_RPC_URL else None
 db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
 
 last_scan_time = time.time()
@@ -148,14 +149,15 @@ def handle_commands_loop():
                                   json={"chat_id": ADMIN_USER_ID, "text": f"🛡️ WhaleMatrix: {status}\n🧱 Blocks: {blocks_scanned}\n⏳ Lag: {lag}s"})
         except: time.sleep(5)
 
-# --- 7. MAIN ENGINE (OVERDRIVE RESTORED) ---
+# --- 7. MAIN ENGINE (TOTAL RECALL REBOOT) ---
 
 def main():
     global last_scan_time, blocks_scanned
-    print("🚀 WhaleMatrix V11.3 FULL RESTORE ONLINE", flush=True)
+    print("🚀 WhaleMatrix V11.5 TOTAL RECALL ONLINE", flush=True)
     
     try:
-        last_slot = primary_client.get_slot(commitment="confirmed").value - 1
+        # Start immediately at Tip
+        last_slot = primary_client.get_slot().value - 1
         print(f"🔗 Pulse Started at: {last_slot + 1}", flush=True)
     except:
         return
@@ -166,15 +168,22 @@ def main():
         try:
             if blocks_scanned % 10 == 0: gc.collect()
             
+            # --- THE WATCHDOG ---
+            # If the scanner hasn't moved for 5 minutes, force reboot
+            lag = int(time.time() - last_scan_time)
+            if lag > 300 and blocks_scanned > 0:
+                print(f"💀 CRITICAL LAG ({lag}s). Forcing Reboot...", flush=True)
+                os._exit(1)
+
             # Tip check
             try:
-                current_tip = primary_client.get_slot(commitment="processed").value
+                current_tip = primary_client.get_slot().value
             except:
                 if fallback_client:
-                    current_tip = fallback_client.get_slot(commitment="processed").value
+                    current_tip = fallback_client.get_slot().value
                 else: continue
 
-            # OVERDRIVE JUMP: If lag > 15 slots, JUMP immediately
+            # RESCUE JUMP: If lag > 15 slots, warp to tip
             if (current_tip - last_slot) > 15: 
                 print(f"⚠️ Overdrive Jump: Lag was {current_tip - last_slot}. Warping to tip.", flush=True)
                 last_slot = current_tip - 1
@@ -198,7 +207,7 @@ def main():
                     except: pass
 
             if block and block.transactions:
-                last_scan_time = time.time()
+                last_scan_time = time.time() # Resets the Watchdog
                 blocks_scanned += 1
                 for tx in block.transactions:
                     if not tx.meta or tx.meta.err: continue
