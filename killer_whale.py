@@ -14,7 +14,7 @@ ALPHA_WATCH_THRESHOLD = 500
 
 # RPC Endpoints
 ALCHEMY_URL = os.getenv("ALCHEMY_URL")
-FALLBACK_RPC_URL = os.getenv("FALLBACK_RPC_URL") # ADD THIS TO YOUR RAILWAY VARS
+FALLBACK_RPC_URL = os.getenv("FALLBACK_RPC_URL") 
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -80,11 +80,13 @@ def process_whale_move(tx, diff):
         sender = str(tx.transaction.message.account_keys[0])
         receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
         
+        # 1. Price Context
         sol_mint = "So11111111111111111111111111111111111111112"
         prices = get_live_prices([sol_mint])
         sol_price = prices.get(sol_mint, 90.0)
         usd_val = diff * sol_price
 
+        # 2. Alpha Detection & Supabase Logging
         alpha_text = ""
         if diff >= ALPHA_WATCH_THRESHOLD and hasattr(tx.meta, 'post_token_balances'):
             pre_map = {str(b.mint): (b.ui_token_amount.ui_amount or 0) for b in tx.meta.pre_token_balances} if hasattr(tx.meta, 'pre_token_balances') else {}
@@ -101,6 +103,7 @@ def process_whale_move(tx, diff):
 
         s_label, r_label = get_label(sender), get_label(receiver)
 
+        # 3. Premium Layout Alert
         msg = (
             f"🕵️‍♂️ <b>SOMETHING IS COOKING…</b>{alpha_text}\n\n"
             f"💰 <b>{diff:,.0f} $SOL (~${usd_val:,.0f})</b>\n\n"
@@ -113,7 +116,13 @@ def process_whale_move(tx, diff):
         )
 
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": False}, timeout=8)
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID, 
+            "text": msg, 
+            "parse_mode": "HTML", 
+            "disable_web_page_preview": False
+        }
+        requests.post(url, json=payload, timeout=8)
 
     except Exception as e:
         print(f"❌ Alert Error: {e}", flush=True)
@@ -136,17 +145,22 @@ def handle_commands_loop():
                                   json={"chat_id": ADMIN_USER_ID, "text": f"🛡️ WhaleMatrix: {status}\n🧱 Blocks: {blocks_scanned}\n⏳ Lag: {lag}s"})
         except: time.sleep(5)
 
-# --- 7. MAIN ENGINE (DUAL-ENGINE FAILOVER) ---
+# --- 7. MAIN ENGINE (SMART FAILOVER) ---
 
 def main():
     global last_scan_time, blocks_scanned
-    print("🚀 WhaleMatrix V10.9.2 DUAL-ENGINE ONLINE", flush=True)
+    print("🚀 WhaleMatrix V10.9.3 SMART FAILOVER ONLINE", flush=True)
+    
+    primary_fail_count = 0
     
     try:
         current_tip = primary_client.get_slot().value
         last_slot = current_tip - 2
     except:
-        return
+        if fallback_client:
+            current_tip = fallback_client.get_slot().value
+            last_slot = current_tip - 2
+        else: return
 
     threading.Thread(target=handle_commands_loop, daemon=True).start()
 
@@ -158,9 +172,7 @@ def main():
             try:
                 current_tip = primary_client.get_slot().value
             except:
-                if fallback_client:
-                    current_tip = fallback_client.get_slot().value
-                else: continue
+                current_tip = fallback_client.get_slot().value if fallback_client else last_slot
 
             if current_tip <= last_slot:
                 time.sleep(0.5); continue
@@ -172,10 +184,14 @@ def main():
             try:
                 block_res = primary_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
                 block = block_res.value
+                primary_fail_count = 0 # Reset on success
             except:
+                primary_fail_count += 1
                 # ATTEMPT 2: Fallback RPC
                 if fallback_client:
-                    print(f"🔄 Primary Lagging. Switching to Fallback for Slot {target_slot}", flush=True)
+                    if primary_fail_count % 50 == 1:
+                        print(f"🔄 Primary Lagging (Count: {primary_fail_count}). Using Fallback.", flush=True)
+                    
                     try:
                         block_res = fallback_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
                         block = block_res.value
