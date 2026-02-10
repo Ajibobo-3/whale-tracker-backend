@@ -43,9 +43,8 @@ KNOWN_WALLETS = {
 }
 
 # --- 3. STATE INITIALIZATION ---
-# Strict 10s timeout to avoid 'Infinite Hang'
-primary_client = Client(ALCHEMY_URL, timeout=10, commitment="confirmed")
-fallback_client = Client(FALLBACK_RPC_URL, timeout=10, commitment="confirmed") if FALLBACK_RPC_URL else None
+primary_client = Client(ALCHEMY_URL, timeout=12, commitment="confirmed")
+fallback_client = Client(FALLBACK_RPC_URL, timeout=12, commitment="confirmed") if FALLBACK_RPC_URL else None
 db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
 
 last_scan_time = time.time()
@@ -90,13 +89,11 @@ def process_whale_move(tx, diff):
         receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
         dex_name = identify_dex(tx)
         
-        # Price Context
         sol_mint = "So11111111111111111111111111111111111111112"
         prices = get_live_prices([sol_mint])
         sol_price = prices.get(sol_mint, 90.0)
         usd_val = diff * sol_price
 
-        # Alpha Logic (Supabase Upsert)
         alpha_text = ""
         if diff >= ALPHA_WATCH_THRESHOLD and hasattr(tx.meta, 'post_token_balances'):
             pre_map = {str(b.mint): (b.ui_token_amount.ui_amount or 0) for b in tx.meta.pre_token_balances} if hasattr(tx.meta, 'pre_token_balances') else {}
@@ -144,37 +141,44 @@ def handle_commands_loop():
                 m = update.get("message", {})
                 if m.get("text") == "/health" and m.get("from", {}).get("id") == ADMIN_USER_ID:
                     lag = int(time.time() - last_scan_time)
-                    status = "Dual-Engine Active" if FALLBACK_RPC_URL else "Single-Engine"
+                    status = "Overdrive Active" if FALLBACK_RPC_URL else "Single-Engine"
                     requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                                   json={"chat_id": ADMIN_USER_ID, "text": f"🛡️ WhaleMatrix: {status}\n🧱 Blocks: {blocks_scanned}\n⏳ Lag: {lag}s"})
         except: time.sleep(5)
 
-# --- 7. MAIN ENGINE (WATCHDOG ENFORCED) ---
+# --- 7. MAIN ENGINE (HEARTBEAT ENFORCED) ---
 
 def main():
     global last_scan_time, blocks_scanned
-    print("🚀 WhaleMatrix V11.5 TOTAL RECALL ONLINE", flush=True)
+    print("🚀 WhaleMatrix V11.6 HEARTBEAT ONLINE", flush=True)
     
     try:
-        # Start immediately at Tip to clear historical lag
-        last_slot = primary_client.get_slot().value - 1
-        print(f"🔗 Pulse Started at: {last_slot + 1}", flush=True)
+        current_tip = primary_client.get_slot().value
+        last_slot = current_tip - 1
+        print(f"🔗 Pulse Started at: {current_tip}", flush=True)
     except:
         return
 
     threading.Thread(target=handle_commands_loop, daemon=True).start()
 
+    last_heartbeat = time.time()
+
     while True:
         try:
             if blocks_scanned % 10 == 0: gc.collect()
             
-            # --- THE WATCHDOG ---
-            # If the loop hasn't completed in 5 minutes, force kill and let Railway reboot
+            # --- THE HEARTBEAT ---
+            if time.time() - last_heartbeat > 10:
+                print(f"💓 Heartbeat: Looking for slot {last_slot + 1}...", flush=True)
+                last_heartbeat = time.time()
+
+            # The Watchdog (V11.5)
             lag = int(time.time() - last_scan_time)
-            if lag > 300 and blocks_scanned > 0:
-                print(f"💀 CRITICAL LAG ({lag}s). Forcing Reboot...", flush=True)
+            if lag > 600 and blocks_scanned > 0:
+                print(f"💀 CRITICAL HANG ({lag}s). Forcing Reboot...", flush=True)
                 os._exit(1)
 
+            # Tip Check
             try:
                 current_tip = primary_client.get_slot().value
             except:
@@ -182,9 +186,9 @@ def main():
                     current_tip = fallback_client.get_slot().value
                 else: continue
 
-            # RESCUE JUMP: If lag > 15 slots, warp to tip
+            # Rescue Jump
             if (current_tip - last_slot) > 15: 
-                print(f"⚠️ Overdrive Jump: Lag was {current_tip - last_slot}. Warping...", flush=True)
+                print(f"⚠️ Overdrive Jump: Lagging {current_tip - last_slot} slots. Warping...", flush=True)
                 last_slot = current_tip - 1
                 continue
 
@@ -194,11 +198,14 @@ def main():
             target_slot = last_slot + 1
             block = None
 
-            # Dual-Engine Fetch
+            # Fetch logic with 429 Detection
             try:
                 block_res = primary_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
                 block = block_res.value
-            except:
+            except Exception as e:
+                if "429" in str(e):
+                    print("🚫 RPC Rate Limited (429). Sleeping 2s...", flush=True)
+                    time.sleep(2)
                 if fallback_client:
                     try:
                         block_res = fallback_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
@@ -206,7 +213,7 @@ def main():
                     except: pass
 
             if block and block.transactions:
-                last_scan_time = time.time() # This resets the Watchdog
+                last_scan_time = time.time() 
                 blocks_scanned += 1
                 for tx in block.transactions:
                     if not tx.meta or tx.meta.err: continue
@@ -218,7 +225,7 @@ def main():
                 if blocks_scanned % 5 == 0: 
                     print(f"🧱 Block {target_slot} Scanned. Total: {blocks_scanned}", flush=True)
             
-            last_slot += 1 # Always move forward to prevent 'Grounding'
+            last_slot += 1
             
         except Exception as e:
             print(f"🚨 Engine Error: {e}", flush=True)
