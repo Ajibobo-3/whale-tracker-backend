@@ -41,8 +41,9 @@ KNOWN_WALLETS = {
 }
 
 # --- 3. STATE INITIALIZATION ---
-primary_client = Client(ALCHEMY_URL, timeout=10)
-fallback_client = Client(FALLBACK_RPC_URL, timeout=10) if FALLBACK_RPC_URL else None
+# Using 'confirmed' commitment for 2x faster block retrieval
+primary_client = Client(ALCHEMY_URL, timeout=10, commitment="confirmed")
+fallback_client = Client(FALLBACK_RPC_URL, timeout=10, commitment="confirmed") if FALLBACK_RPC_URL else None
 db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
 
 last_scan_time = time.time()
@@ -136,18 +137,18 @@ def handle_commands_loop():
                                   json={"chat_id": ADMIN_USER_ID, "text": f"🛡️ WhaleMatrix: {status}\n🧱 Blocks: {blocks_scanned}\n⏳ Lag: {lag}s"})
         except: time.sleep(5)
 
-# --- 7. MAIN ENGINE (DEEP SEA RESCUE) ---
+# --- 7. MAIN ENGINE (AGGRESSIVE PULSE) ---
 
 def main():
     global last_scan_time, blocks_scanned
-    print("🚀 WhaleMatrix V11.0 DEEP SEA RESCUE ONLINE", flush=True)
+    print("🚀 WhaleMatrix V11.1 AGGRESSIVE PULSE ONLINE", flush=True)
     
     try:
-        # Start at the latest slot to avoid initial lag
-        current_tip = primary_client.get_slot().value
-        last_slot = current_tip - 1
-        print(f"🔗 Starting at Tip: {last_slot}", flush=True)
-    except:
+        # Start immediately at the network tip
+        last_slot = primary_client.get_slot().value
+        print(f"🔗 Pulse Started at: {last_slot}", flush=True)
+    except Exception as e:
+        print(f"🚨 Initial Sync Failed: {e}", flush=True)
         return
 
     threading.Thread(target=handle_commands_loop, daemon=True).start()
@@ -164,18 +165,21 @@ def main():
                     current_tip = fallback_client.get_slot().value
                 else: continue
 
-            # RESCUE LOGIC: If lag > 20 slots, JUMP forward
-            if (current_tip - last_slot) > 20: 
-                print(f"⚠️ Lag Detected ({current_tip - last_slot} slots). Jumping to tip.", flush=True)
+            # EMERGENCY JUMP: If lag > 25 slots, reset to tip
+            if (current_tip - last_slot) > 25: 
+                print(f"⚡ JUMPING: Lag was {current_tip - last_slot}. Re-syncing to tip.", flush=True)
                 last_slot = current_tip - 1
+                time.sleep(1) # Let RPC breathe
+                continue
 
             if current_tip <= last_slot:
-                time.sleep(0.5); continue
+                time.sleep(0.4) 
+                continue
             
             target_slot = last_slot + 1
             block = None
 
-            # Dual-Engine Fetch
+            # Fetch logic with immediate skip
             try:
                 block_res = primary_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
                 block = block_res.value
@@ -197,13 +201,16 @@ def main():
                     del tx
                 
                 if blocks_scanned % 5 == 0: 
-                    print(f"🧱 Block {target_slot} Scanned. Lag: {current_tip - target_slot}", flush=True)
+                    print(f"🧱 Block {target_slot} OK. Lag: {current_tip - target_slot}", flush=True)
+            else:
+                # If slot empty or error, DO NOT stay here. Force increment.
+                if target_slot % 50 == 0:
+                    print(f"⚪ Slot {target_slot} empty/skipped. Moving...", flush=True)
             
-            # Always increment slot to prevent freezing on empty/error slots
             last_slot += 1
             
         except Exception as e:
-            print(f"🚨 Engine Hiccup: {e}", flush=True)
+            print(f"🚨 Heartbeat Error: {e}", flush=True)
             time.sleep(1)
 
 if __name__ == "__main__":
