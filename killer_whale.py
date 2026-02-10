@@ -1,4 +1,4 @@
-import time, requests, os, threading, datetime
+import time, requests, os, threading, datetime, gc
 from datetime import timezone
 from urllib.parse import quote
 from solana.rpc.api import Client
@@ -47,7 +47,6 @@ last_update_id = 0
 # --- 4. UTILITY FUNCTIONS ---
 
 def get_live_prices(mints):
-    """Hardened V10.0: Uses Jupiter V2 for stable real-time pricing."""
     try:
         clean_mints = [str(m) for m in mints if m]
         ids = ",".join(clean_mints)
@@ -61,7 +60,7 @@ def get_live_prices(mints):
                     prices[mint] = float(data['price'])
         return prices
     except Exception as e:
-        print(f"⚠️ Market Data Error: {e}")
+        print(f"⚠️ Market Data Error: {e}", flush=True)
         return {}
 
 def get_label(addr):
@@ -114,7 +113,7 @@ def process_whale_move(tx, diff):
                 mints_to_fetch.append(str(b.mint))
         
         prices = get_live_prices(list(set(mints_to_fetch)))
-        sol_price = prices.get(sol_mint, 87.84) # Fallback to user-provided benchmark if API hangs
+        sol_price = prices.get(sol_mint, 87.84) 
         usd_val = diff * sol_price
 
         # 2. Precision Alpha Logic (Net Delta)
@@ -166,8 +165,7 @@ def process_whale_move(tx, diff):
         msg = (f"{icon} <b>{signal}</b>\n💰 <b>{diff:,.0f} SOL</b> (${usd_val:,.2f})\n\n"
                f"📤 <b>From:</b> {s_label}\n📥 <b>To:</b> {r_label}\n\n"
                f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a> | "
-               f"<a href='https://arkhamintelligence.com/explorer/address/{sender}'>Arkham Intelligence</a> | "
-               f"<a href='https://bubblemaps.io/solana/token/{sender}'>BubbleMaps</a>")
+               f"<a href='https://arkhamintelligence.com/explorer/address/{sender}'>Arkham Intelligence</a>")
         
         tweet_text = quote(f"🚨 WhaleMatrix Alert: {diff:,.0f} SOL moved! #Solana #WhaleMatrix #Alpha")
         twitter_link = f"https://twitter.com/intent/tweet?text={tweet_text}"
@@ -179,37 +177,80 @@ def process_whale_move(tx, diff):
 # --- 6. THE COMMAND LISTENER ---
 
 def handle_commands_loop():
-    global last_update_id, last_scan_time
+    global last_update_id, last_scan_time, blocks_scanned
     print("👂 WhaleMatrix Listener Active", flush=True)
     while True:
         try:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            # Command listener logic restored for health/topbuy
-            time.sleep(10) # Placeholder for getUpdates logic
-        except: time.sleep(2)
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+            params = {"offset": last_update_id + 1, "timeout": 10}
+            res = requests.get(url, params=params, timeout=15).json()
+            
+            for update in res.get("result", []):
+                last_update_id = update["update_id"]
+                msg = update.get("message", {})
+                user_id = msg.get("from", {}).get("id")
+                text = msg.get("text", "")
+                
+                if text == "/health" and user_id == ADMIN_USER_ID:
+                    lag = int(time.time() - last_scan_time)
+                    send_alert(ADMIN_USER_ID, f"🛡️ Scanner: Active ({lag}s lag)\n🧱 Blocks: {blocks_scanned}")
+
+                elif text == "/topbuy":
+                    time_threshold = (datetime.datetime.now(timezone.utc) - datetime.timedelta(hours=24)).isoformat()
+                    response = db.table("watchlist").select("mint, trigger_vol").gt("created_at", time_threshold).execute()
+                    
+                    if response.data:
+                        rankings = {}
+                        for entry in response.data:
+                            m, v = entry['mint'], entry['trigger_vol']
+                            rankings[m] = rankings.get(m, 0) + v
+                        
+                        sorted_list = sorted(rankings.items(), key=lambda x: x[1], reverse=True)[:5]
+                        summary = "🏛️ <b>TOP WHALE ENTRIES (24H)</b>\n\n"
+                        for i, (mint, total_vol) in enumerate(sorted_list, 1):
+                            summary += f"{i}. <code>{mint[:4]}...</code>\n💰 Vol: <b>{total_vol:,.0f} SOL</b>\n\n"
+                        send_alert(TELEGRAM_CHAT_ID, summary)
+                    else:
+                        send_alert(TELEGRAM_CHAT_ID, "📉 No data in 24H.")
+        except Exception as e:
+            print(f"⚠️ Listener Error: {e}", flush=True)
+            time.sleep(5)
 
 # --- 7. MAIN SCANNER ---
 
 def main():
     global last_scan_time, blocks_scanned
-    print(f"🚀 WhaleMatrix V10.0 PRODUCTION ONLINE", flush=True)
-    threading.Thread(target=handle_commands_loop, daemon=True).start()
+    print(f"🚀 WhaleMatrix V10.2 RESILIENT ONLINE", flush=True)
     
-    last_slot = solana_client.get_slot().value 
+    # 1. Pre-spawn Connection Check
+    try:
+        current_slot = solana_client.get_slot().value
+        print(f"🔗 RPC Connection Verified. Slot: {current_slot}", flush=True)
+    except Exception as e:
+        print(f"🚨 CRITICAL RPC FAILURE: {e}. Check ALCHEMY_URL.", flush=True)
+        return
+
+    threading.Thread(target=handle_commands_loop, daemon=True).start()
+    last_slot = current_slot
 
     while True:
         try:
             current_slot = solana_client.get_slot().value
             if current_slot <= last_slot:
-                time.sleep(0.2); continue
+                time.sleep(0.5); continue
             
             block_data = solana_client.get_block(current_slot, encoding="jsonParsed", max_supported_transaction_version=0)
             block = block_data.value
+            
             if not block or not block.transactions:
                 last_slot = current_slot; continue
             
             last_scan_time = time.time()
             blocks_scanned += 1
+
+            # Forced memory cleanup
+            if blocks_scanned % 50 == 0:
+                gc.collect()
 
             for tx in block.transactions:
                 try:
@@ -221,8 +262,8 @@ def main():
 
             last_slot = current_slot
         except Exception as e:
-            print(f"⚠️ Restarting: {e}")
-            time.sleep(1)
+            print(f"🚨 Scanner Restating: {e}", flush=True)
+            time.sleep(2)
 
 if __name__ == "__main__":
     main()
