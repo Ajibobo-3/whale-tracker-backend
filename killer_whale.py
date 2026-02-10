@@ -41,8 +41,8 @@ KNOWN_WALLETS = {
 }
 
 # --- 3. STATE INITIALIZATION ---
-primary_client = Client(ALCHEMY_URL, timeout=8)
-fallback_client = Client(FALLBACK_RPC_URL, timeout=8) if FALLBACK_RPC_URL else None
+primary_client = Client(ALCHEMY_URL, timeout=10)
+fallback_client = Client(FALLBACK_RPC_URL, timeout=10) if FALLBACK_RPC_URL else None
 db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
 
 last_scan_time = time.time()
@@ -80,13 +80,11 @@ def process_whale_move(tx, diff):
         sender = str(tx.transaction.message.account_keys[0])
         receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
         
-        # 1. Price Context
         sol_mint = "So11111111111111111111111111111111111111112"
         prices = get_live_prices([sol_mint])
         sol_price = prices.get(sol_mint, 90.0)
         usd_val = diff * sol_price
 
-        # 2. Alpha Detection & Supabase Logging
         alpha_text = ""
         if diff >= ALPHA_WATCH_THRESHOLD and hasattr(tx.meta, 'post_token_balances'):
             pre_map = {str(b.mint): (b.ui_token_amount.ui_amount or 0) for b in tx.meta.pre_token_balances} if hasattr(tx.meta, 'pre_token_balances') else {}
@@ -103,7 +101,6 @@ def process_whale_move(tx, diff):
 
         s_label, r_label = get_label(sender), get_label(receiver)
 
-        # 3. Premium Layout Alert
         msg = (
             f"🕵️‍♂️ <b>SOMETHING IS COOKING…</b>{alpha_text}\n\n"
             f"💰 <b>{diff:,.0f} $SOL (~${usd_val:,.0f})</b>\n\n"
@@ -116,13 +113,7 @@ def process_whale_move(tx, diff):
         )
 
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID, 
-            "text": msg, 
-            "parse_mode": "HTML", 
-            "disable_web_page_preview": False
-        }
-        requests.post(url, json=payload, timeout=8)
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": False}, timeout=8)
 
     except Exception as e:
         print(f"❌ Alert Error: {e}", flush=True)
@@ -145,22 +136,19 @@ def handle_commands_loop():
                                   json={"chat_id": ADMIN_USER_ID, "text": f"🛡️ WhaleMatrix: {status}\n🧱 Blocks: {blocks_scanned}\n⏳ Lag: {lag}s"})
         except: time.sleep(5)
 
-# --- 7. MAIN ENGINE (SMART FAILOVER) ---
+# --- 7. MAIN ENGINE (DEEP SEA RESCUE) ---
 
 def main():
     global last_scan_time, blocks_scanned
-    print("🚀 WhaleMatrix V10.9.3 SMART FAILOVER ONLINE", flush=True)
-    
-    primary_fail_count = 0
+    print("🚀 WhaleMatrix V11.0 DEEP SEA RESCUE ONLINE", flush=True)
     
     try:
+        # Start at the latest slot to avoid initial lag
         current_tip = primary_client.get_slot().value
-        last_slot = current_tip - 2
+        last_slot = current_tip - 1
+        print(f"🔗 Starting at Tip: {last_slot}", flush=True)
     except:
-        if fallback_client:
-            current_tip = fallback_client.get_slot().value
-            last_slot = current_tip - 2
-        else: return
+        return
 
     threading.Thread(target=handle_commands_loop, daemon=True).start()
 
@@ -168,11 +156,18 @@ def main():
         try:
             if blocks_scanned % 10 == 0: gc.collect()
             
-            # Use Primary for Tip Check
+            # Tip Check
             try:
                 current_tip = primary_client.get_slot().value
             except:
-                current_tip = fallback_client.get_slot().value if fallback_client else last_slot
+                if fallback_client:
+                    current_tip = fallback_client.get_slot().value
+                else: continue
+
+            # RESCUE LOGIC: If lag > 20 slots, JUMP forward
+            if (current_tip - last_slot) > 20: 
+                print(f"⚠️ Lag Detected ({current_tip - last_slot} slots). Jumping to tip.", flush=True)
+                last_slot = current_tip - 1
 
             if current_tip <= last_slot:
                 time.sleep(0.5); continue
@@ -180,18 +175,12 @@ def main():
             target_slot = last_slot + 1
             block = None
 
-            # ATTEMPT 1: Primary RPC
+            # Dual-Engine Fetch
             try:
                 block_res = primary_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
                 block = block_res.value
-                primary_fail_count = 0 # Reset on success
             except:
-                primary_fail_count += 1
-                # ATTEMPT 2: Fallback RPC
                 if fallback_client:
-                    if primary_fail_count % 50 == 1:
-                        print(f"🔄 Primary Lagging (Count: {primary_fail_count}). Using Fallback.", flush=True)
-                    
                     try:
                         block_res = fallback_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
                         block = block_res.value
@@ -208,12 +197,13 @@ def main():
                     del tx
                 
                 if blocks_scanned % 5 == 0: 
-                    print(f"🧱 Block {target_slot} Scanned.", flush=True)
+                    print(f"🧱 Block {target_slot} Scanned. Lag: {current_tip - target_slot}", flush=True)
             
+            # Always increment slot to prevent freezing on empty/error slots
             last_slot += 1
             
         except Exception as e:
-            print(f"🚨 Loop Crash: {e}", flush=True)
+            print(f"🚨 Engine Hiccup: {e}", flush=True)
             time.sleep(1)
 
 if __name__ == "__main__":
