@@ -11,7 +11,11 @@ load_dotenv()
 WHALE_THRESHOLD = 1000  
 LOUD_THRESHOLD = 2500
 ALPHA_WATCH_THRESHOLD = 500 
+
+# RPC Endpoints
 ALCHEMY_URL = os.getenv("ALCHEMY_URL")
+FALLBACK_RPC_URL = os.getenv("FALLBACK_RPC_URL") # ADD THIS TO YOUR RAILWAY VARS
+
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -37,7 +41,8 @@ KNOWN_WALLETS = {
 }
 
 # --- 3. STATE INITIALIZATION ---
-solana_client = Client(ALCHEMY_URL, timeout=15)
+primary_client = Client(ALCHEMY_URL, timeout=8)
+fallback_client = Client(FALLBACK_RPC_URL, timeout=8) if FALLBACK_RPC_URL else None
 db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
 
 last_scan_time = time.time()
@@ -67,12 +72,6 @@ def get_token_info(mint):
     if mint_str == "So11111111111111111111111111111111111111112": return "SOL"
     return f"Token (<code>{mint_str[:4]}...{mint_str[-4:]}</code>)"
 
-def identify_dex(tx):
-    account_keys = [str(k) for k in tx.transaction.message.account_keys]
-    for p_id, name in DEX_MAP.items():
-        if p_id in account_keys: return name
-    return "Private/DEX"
-
 # --- 5. THE ALPHA ENGINE ---
 
 def process_whale_move(tx, diff):
@@ -81,13 +80,11 @@ def process_whale_move(tx, diff):
         sender = str(tx.transaction.message.account_keys[0])
         receiver = str(tx.transaction.message.account_keys[1]) if len(tx.transaction.message.account_keys) > 1 else "Unknown"
         
-        # 1. Price context
         sol_mint = "So11111111111111111111111111111111111111112"
         prices = get_live_prices([sol_mint])
         sol_price = prices.get(sol_mint, 90.0)
         usd_val = diff * sol_price
 
-        # 2. Alpha Token Detection (Net Delta)
         alpha_text = ""
         if diff >= ALPHA_WATCH_THRESHOLD and hasattr(tx.meta, 'post_token_balances'):
             pre_map = {str(b.mint): (b.ui_token_amount.ui_amount or 0) for b in tx.meta.pre_token_balances} if hasattr(tx.meta, 'pre_token_balances') else {}
@@ -97,16 +94,13 @@ def process_whale_move(tx, diff):
                 received = (post.ui_token_amount.ui_amount or 0) - pre_map.get(mint, 0)
                 
                 if received > 0.0001:
-                    # LOG TO DATABASE
                     db.table("watchlist").upsert({"mint": mint, "created_at": datetime.datetime.now(timezone.utc).isoformat(), "trigger_vol": diff}).execute()
-                    
                     token_label = get_token_info(mint)
                     alpha_text = f"\n🌟 <b>ALPHA: Bought {received:,.1f} {token_label}</b>"
                     break
 
         s_label, r_label = get_label(sender), get_label(receiver)
 
-        # 3. Premium Layout Alert
         msg = (
             f"🕵️‍♂️ <b>SOMETHING IS COOKING…</b>{alpha_text}\n\n"
             f"💰 <b>{diff:,.0f} $SOL (~${usd_val:,.0f})</b>\n\n"
@@ -118,24 +112,16 @@ def process_whale_move(tx, diff):
             f"<a href='https://bubblemaps.io/solana/token/{sender}'>BubbleMaps</a>"
         )
 
-        # Send alert
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID, 
-            "text": msg, 
-            "parse_mode": "HTML", 
-            "disable_web_page_preview": False # Solscan peek view enabled
-        }
-        requests.post(url, json=payload, timeout=8)
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": False}, timeout=8)
 
     except Exception as e:
         print(f"❌ Alert Error: {e}", flush=True)
 
-# --- 6. COMMANDS & 7. MAIN ENGINE ---
+# --- 6. COMMANDS ---
 
 def handle_commands_loop():
     global last_update_id, last_scan_time, blocks_scanned
-    print("👂 Command Listener Active", flush=True)
     while True:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
@@ -145,30 +131,56 @@ def handle_commands_loop():
                 m = update.get("message", {})
                 if m.get("text") == "/health" and m.get("from", {}).get("id") == ADMIN_USER_ID:
                     lag = int(time.time() - last_scan_time)
+                    status = "Dual-Engine Active" if FALLBACK_RPC_URL else "Single-Engine"
                     requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                                  json={"chat_id": ADMIN_USER_ID, "text": f"🛡️ WhaleMatrix: Active\n🧱 Blocks: {blocks_scanned}\n⏳ Lag: {lag}s"})
+                                  json={"chat_id": ADMIN_USER_ID, "text": f"🛡️ WhaleMatrix: {status}\n🧱 Blocks: {blocks_scanned}\n⏳ Lag: {lag}s"})
         except: time.sleep(5)
+
+# --- 7. MAIN ENGINE (DUAL-ENGINE FAILOVER) ---
 
 def main():
     global last_scan_time, blocks_scanned
-    print("🚀 WhaleMatrix V10.9 FULL POWER ONLINE", flush=True)
-    try: last_slot = solana_client.get_slot().value - 1
-    except: return
+    print("🚀 WhaleMatrix V10.9.2 DUAL-ENGINE ONLINE", flush=True)
+    
+    try:
+        current_tip = primary_client.get_slot().value
+        last_slot = current_tip - 2
+    except:
+        return
 
     threading.Thread(target=handle_commands_loop, daemon=True).start()
 
     while True:
         try:
             if blocks_scanned % 10 == 0: gc.collect()
-            current_slot = solana_client.get_slot().value
-            if current_slot <= last_slot:
+            
+            # Use Primary for Tip Check
+            try:
+                current_tip = primary_client.get_slot().value
+            except:
+                if fallback_client:
+                    current_tip = fallback_client.get_slot().value
+                else: continue
+
+            if current_tip <= last_slot:
                 time.sleep(0.5); continue
             
-            # Skip lag to avoid RAM pile-up
-            if (current_slot - last_slot) > 10: last_slot = current_slot - 1
+            target_slot = last_slot + 1
+            block = None
 
-            block_res = solana_client.get_block(last_slot + 1, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
-            block = block_res.value
+            # ATTEMPT 1: Primary RPC
+            try:
+                block_res = primary_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
+                block = block_res.value
+            except:
+                # ATTEMPT 2: Fallback RPC
+                if fallback_client:
+                    print(f"🔄 Primary Lagging. Switching to Fallback for Slot {target_slot}", flush=True)
+                    try:
+                        block_res = fallback_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
+                        block = block_res.value
+                    except: pass
+
             if block and block.transactions:
                 last_scan_time = time.time()
                 blocks_scanned += 1
@@ -178,10 +190,15 @@ def main():
                     if diff >= WHALE_THRESHOLD:
                         process_whale_move(tx, diff)
                     del tx
-                if blocks_scanned % 10 == 0: print(f"🧱 Block {last_slot + 1} Done.", flush=True)
-            del block
+                
+                if blocks_scanned % 5 == 0: 
+                    print(f"🧱 Block {target_slot} Scanned.", flush=True)
+            
             last_slot += 1
-        except: time.sleep(1)
+            
+        except Exception as e:
+            print(f"🚨 Loop Crash: {e}", flush=True)
+            time.sleep(1)
 
 if __name__ == "__main__":
     main()
