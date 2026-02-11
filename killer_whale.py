@@ -15,7 +15,8 @@ ALPHA_WATCH_THRESHOLD = 500
 
 # RPC Endpoints
 ALCHEMY_URL = os.environ.get("ALCHEMY_URL")
-FALLBACK_RPC_URL = os.environ.get("FALLBACK_RPC_URL") 
+# Forcing a high-performance public fallback
+FALLBACK_RPC_URL = os.environ.get("FALLBACK_RPC_URL") or "https://api.mainnet-beta.solana.com"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
@@ -23,7 +24,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID") 
 ADMIN_USER_ID = 7302870957 
 
-# --- 2. MAPPINGS & DATA ---
+# --- 2. MAPPINGS & DATA (KEEP AS IS) ---
 DEX_MAP = {
     "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4": "Jupiter V6",
     "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB": "Jupiter V4",
@@ -45,15 +46,14 @@ KNOWN_WALLETS = {
 
 # --- 3. STATE INITIALIZATION ---
 primary_client = Client(ALCHEMY_URL, timeout=30, commitment="confirmed")
-fallback_client = Client(FALLBACK_RPC_URL, timeout=30, commitment="confirmed") if FALLBACK_RPC_URL else None
+fallback_client = Client(FALLBACK_RPC_URL, timeout=30, commitment="confirmed")
 db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
 
 last_scan_time = time.time()
 blocks_scanned = 0
 last_update_id = 0
 
-# --- 4. UTILITY FUNCTIONS ---
-
+# --- 4. UTILITY FUNCTIONS (KEEP AS IS) ---
 def get_live_prices(mints):
     try:
         clean_mints = [str(m) for m in mints if m]
@@ -82,7 +82,6 @@ def identify_dex(tx):
     return "Private/DEX"
 
 # --- 5. THE ALPHA ENGINE ---
-
 def process_whale_move(tx, diff):
     try:
         sig = str(tx.transaction.signatures[0])
@@ -110,7 +109,6 @@ def process_whale_move(tx, diff):
                     break
 
         s_label, r_label = get_label(sender), get_label(receiver)
-
         msg = (
             f"🕵️‍♂️ <b>SOMETHING IS COOKING…</b>{alpha_text}\n\n"
             f"💰 <b>{diff:,.0f} $SOL (~${usd_val:,.0f})</b>\n\n"
@@ -121,15 +119,12 @@ def process_whale_move(tx, diff):
             f"<a href='https://arkhamintelligence.com/explorer/address/{sender}'>Arkham</a> | "
             f"<a href='https://bubblemaps.io/solana/token/{sender}'>BubbleMaps</a>"
         )
-
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                       json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": False}, timeout=8)
-
     except Exception as e:
         print(f"❌ Alert Error: {e}", flush=True)
 
 # --- 6. COMMANDS ---
-
 def handle_commands_loop():
     global last_update_id, last_scan_time, blocks_scanned
     print("👂 Command Listener Active", flush=True)
@@ -142,23 +137,22 @@ def handle_commands_loop():
                 m = update.get("message", {})
                 if m.get("text") == "/health" and m.get("from", {}).get("id") == ADMIN_USER_ID:
                     lag = int(time.time() - last_scan_time)
-                    status = "Railway V11.9.5"
+                    status = "Railway V11.9.8 (Triple-Fetch)"
                     requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                                   json={"chat_id": ADMIN_USER_ID, "text": f"🛡️ WhaleMatrix: {status}\n🧱 Blocks: {blocks_scanned}\n⏳ Lag: {lag}s"})
         except: time.sleep(5)
 
-# --- 7. MAIN ENGINE (RAILWAY PERSISTENCE) ---
-
+# --- 7. MAIN ENGINE (STABILIZED TRIPLE-FETCH) ---
 def main():
     global last_scan_time, blocks_scanned
-    print("🚀 WhaleMatrix V11.9.5 RAILWAY PERSISTENCE ONLINE", flush=True)
+    print("🚀 WhaleMatrix V11.9.8 TRIPLE-FETCH ONLINE", flush=True)
     
     try:
-        # Initial Tip Sync
         current_tip = primary_client.get_slot().value
+        # Start exactly at Tip-30 for maximum indexing stability
         last_slot = current_tip - 30 
         last_scan_time = time.time()
-        print(f"🔗 Pulse Started at: {current_tip} (Syncing from {last_slot})", flush=True)
+        print(f"🔗 Syncing from: {last_slot}", flush=True)
     except Exception as e:
         print(f"🚨 Connection Failed: {e}")
         return
@@ -167,44 +161,40 @@ def main():
 
     while True:
         try:
-            if blocks_scanned > 0 and blocks_scanned % 20 == 0: gc.collect()
+            if blocks_scanned > 0 and blocks_scanned % 15 == 0: gc.collect()
             
             try:
                 current_tip = primary_client.get_slot().value
             except:
-                if fallback_client: current_tip = fallback_client.get_slot().value
-                else: continue
+                current_tip = fallback_client.get_slot().value
 
-            # Stability Warp for Railway
+            # Anti-Warp Cushion
             if (current_tip - last_slot) > 100: 
-                print(f"⚠️ Stability Warp: Resetting to Tip - 30...", flush=True)
+                print(f"⚠️ Heavy Lag detected ({current_tip - last_slot}). Warping to Tip-30...", flush=True)
                 last_slot = current_tip - 31
                 continue
 
-            # Heavy Buffer for Chainstack Free Nodes
+            # Buffer Check
             if current_tip <= (last_slot + 25):
                 time.sleep(1); continue 
             
             target_slot = last_slot + 1
             block = None
 
-            # --- PERSISTENT RETRY LOGIC ---
-            for attempt in range(3):
+            # --- TRIPLE-FETCH LOGIC ---
+            # Attempt 1: Chainstack
+            try:
+                res = primary_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
+                block = res.value
+            except: pass
+
+            # Attempt 2: Public Fallback (Only if Chainstack failed)
+            if not block:
                 try:
-                    block_res = primary_client.get_block(
-                        target_slot, 
-                        encoding="jsonParsed", 
-                        max_supported_transaction_version=0, 
-                        rewards=False
-                    )
-                    block = block_res.value
-                    if block: break 
-                except Exception as e:
-                    if "429" in str(e):
-                        print(f"🚫 Rate Limited. Sleeping 5s...", flush=True)
-                        time.sleep(5)
-                    else:
-                        time.sleep(2) 
+                    res = fallback_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
+                    block = res.value
+                    if block: print(f"✅ Fallback Saved Slot {target_slot}", flush=True)
+                except: pass
 
             if block and block.transactions:
                 last_scan_time = time.time() 
@@ -218,7 +208,7 @@ def main():
                 print(f"🧱 Block {target_slot} Scanned. Total: {blocks_scanned} | Lag: {int(time.time()-last_scan_time)}s", flush=True)
                 last_slot += 1 
             else:
-                print(f"⏩ Slot {target_slot} empty/skipped. Moving on...", flush=True)
+                print(f"⏩ Slot {target_slot} confirmed empty. Moving on...", flush=True)
                 last_slot += 1
             
         except Exception as e:
