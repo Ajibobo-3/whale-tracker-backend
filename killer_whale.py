@@ -9,13 +9,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- 1. GLOBAL SETTINGS ---
-WHALE_THRESHOLD = 0.1
+WHALE_THRESHOLD = 1000  # Set to 1000 for launch (or 0.1 for testing)
 LOUD_THRESHOLD = 2500
-ALPHA_WATCH_THRESHOLD = 0.1
+ALPHA_WATCH_THRESHOLD = 500 
 
 # RPC Endpoints
 ALCHEMY_URL = os.environ.get("ALCHEMY_URL")
-# Forcing a high-performance public fallback
+# High-performance public fallback
 FALLBACK_RPC_URL = os.environ.get("FALLBACK_RPC_URL") or "https://api.mainnet-beta.solana.com"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -137,28 +137,28 @@ def handle_commands_loop():
                 m = update.get("message", {})
                 if m.get("text") == "/health" and m.get("from", {}).get("id") == ADMIN_USER_ID:
                     lag = int(time.time() - last_scan_time)
-                    status = "Railway V11.9.9 (Deep-Sync)"
+                    status = "Railway V12.0 (Stubborn Engine)"
                     requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                                   json={"chat_id": ADMIN_USER_ID, "text": f"🛡️ WhaleMatrix: {status}\n🧱 Blocks: {blocks_scanned}\n⏳ Lag: {lag}s"})
         except: time.sleep(5)
 
-# --- 7. MAIN ENGINE (DEEP INDEX STABILITY) ---
+# --- 7. MAIN ENGINE (STUBBORN RECOVERY) ---
 def main():
     global last_scan_time, blocks_scanned
-    print("🚀 WhaleMatrix V11.9.9 DEEP-SYNC ONLINE", flush=True)
+    print("🚀 WhaleMatrix V12.0 STUBBORN ENGINE ONLINE", flush=True)
 
     # Startup Notification
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                      json={"chat_id": TELEGRAM_CHAT_ID, "text": "✅ WhaleMatrix Launching on Railway... Deep-Syncing Engine."}, timeout=8)
+                      json={"chat_id": TELEGRAM_CHAT_ID, "text": "✅ WhaleMatrix Launching... Stubborn Persistence Active."}, timeout=8)
     except: pass
     
     try:
         current_tip = primary_client.get_slot().value
-        # Start 50 blocks back for absolute indexing stability on free nodes
+        # Start exactly 50 blocks back for maximum indexing stability
         last_slot = current_tip - 50 
         last_scan_time = time.time()
-        print(f"🔗 Pulse Started at: {current_tip} (Syncing from {last_slot})", flush=True)
+        print(f"🔗 Syncing from: {last_slot}", flush=True)
     except Exception as e:
         print(f"🚨 Connection Failed: {e}")
         return
@@ -180,15 +180,16 @@ def main():
                 last_slot = current_tip - 51
                 continue
 
-            # Deep Safety Buffer (20s delay to allow RPC indexing)
-            if current_tip <= (last_slot + 45):
+            # Safety Buffer (Wait for RPC indexing)
+            if current_tip <= (last_slot + 40):
                 time.sleep(1.5); continue 
             
             target_slot = last_slot + 1
             block = None
 
-            # --- TRIPLE-FETCH PERSISTENCE ---
-            for attempt in range(2):
+            # --- STUBBORN TRIPLE-FETCH ---
+            # Instead of skipping, we wait and retry the same block across both RPCs.
+            for attempt in range(5):
                 try:
                     res = primary_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
                     block = res.value
@@ -200,7 +201,11 @@ def main():
                         res = fallback_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
                         block = res.value
                         if block: break
-                    except: time.sleep(1)
+                    except: pass
+                
+                if not block:
+                    print(f"⏳ Slot {target_slot} indexing... Retry {attempt+1}/5", flush=True)
+                    time.sleep(2) # Give the node time to find the block
 
             if block and block.transactions:
                 last_scan_time = time.time() 
@@ -214,8 +219,7 @@ def main():
                 print(f"🧱 Block {target_slot} Scanned. Total: {blocks_scanned} | Lag: {int(time.time()-last_scan_time)}s", flush=True)
                 last_slot += 1 
             else:
-                # Still move on if truly empty
-                print(f"⏩ Slot {target_slot} empty or skipped. Moving on...", flush=True)
+                print(f"⏩ Slot {target_slot} empty or skipped after 5 retries.", flush=True)
                 last_slot += 1
             
         except Exception as e:
