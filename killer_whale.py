@@ -5,6 +5,7 @@ from solana.rpc.api import Client
 from postgrest import SyncPostgrestClient
 from dotenv import load_dotenv
 
+# Railway specific: Ensuring logs are flushed immediately
 load_dotenv()
 
 # --- 1. GLOBAL SETTINGS ---
@@ -13,16 +14,16 @@ LOUD_THRESHOLD = 2500
 ALPHA_WATCH_THRESHOLD = 500 
 
 # RPC Endpoints
-ALCHEMY_URL = os.getenv("ALCHEMY_URL")
-FALLBACK_RPC_URL = os.getenv("FALLBACK_RPC_URL") 
+ALCHEMY_URL = os.environ.get("ALCHEMY_URL")
+FALLBACK_RPC_URL = os.environ.get("FALLBACK_RPC_URL") 
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") 
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID") 
 ADMIN_USER_ID = 7302870957 
 
-# --- 2. MAPPINGS & DATA (FULL RESTORATION) ---
+# --- 2. MAPPINGS & DATA ---
 DEX_MAP = {
     "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4": "Jupiter V6",
     "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB": "Jupiter V4",
@@ -43,8 +44,8 @@ KNOWN_WALLETS = {
 }
 
 # --- 3. STATE INITIALIZATION ---
-primary_client = Client(ALCHEMY_URL, timeout=12, commitment="confirmed")
-fallback_client = Client(FALLBACK_RPC_URL, timeout=12, commitment="confirmed") if FALLBACK_RPC_URL else None
+primary_client = Client(ALCHEMY_URL, timeout=30, commitment="confirmed")
+fallback_client = Client(FALLBACK_RPC_URL, timeout=30, commitment="confirmed") if FALLBACK_RPC_URL else None
 db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
 
 last_scan_time = time.time()
@@ -91,7 +92,7 @@ def process_whale_move(tx, diff):
         
         sol_mint = "So11111111111111111111111111111111111111112"
         prices = get_live_prices([sol_mint])
-        sol_price = prices.get(sol_mint, 90.0)
+        sol_price = prices.get(sol_mint, 95.0)
         usd_val = diff * sol_price
 
         alpha_text = ""
@@ -141,76 +142,69 @@ def handle_commands_loop():
                 m = update.get("message", {})
                 if m.get("text") == "/health" and m.get("from", {}).get("id") == ADMIN_USER_ID:
                     lag = int(time.time() - last_scan_time)
-                    status = "Overdrive Active" if FALLBACK_RPC_URL else "Single-Engine"
+                    status = "Railway V11.9.5"
                     requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                                   json={"chat_id": ADMIN_USER_ID, "text": f"🛡️ WhaleMatrix: {status}\n🧱 Blocks: {blocks_scanned}\n⏳ Lag: {lag}s"})
         except: time.sleep(5)
 
-# --- 7. MAIN ENGINE (HEARTBEAT ENFORCED) ---
+# --- 7. MAIN ENGINE (RAILWAY PERSISTENCE) ---
 
 def main():
     global last_scan_time, blocks_scanned
-    print("🚀 WhaleMatrix V11.6 HEARTBEAT ONLINE", flush=True)
+    print("🚀 WhaleMatrix V11.9.5 RAILWAY PERSISTENCE ONLINE", flush=True)
     
     try:
+        # Initial Tip Sync
         current_tip = primary_client.get_slot().value
-        last_slot = current_tip - 1
-        print(f"🔗 Pulse Started at: {current_tip}", flush=True)
-    except:
+        last_slot = current_tip - 30 
+        last_scan_time = time.time()
+        print(f"🔗 Pulse Started at: {current_tip} (Syncing from {last_slot})", flush=True)
+    except Exception as e:
+        print(f"🚨 Connection Failed: {e}")
         return
 
     threading.Thread(target=handle_commands_loop, daemon=True).start()
 
-    last_heartbeat = time.time()
-
     while True:
         try:
-            if blocks_scanned % 10 == 0: gc.collect()
+            if blocks_scanned > 0 and blocks_scanned % 20 == 0: gc.collect()
             
-            # --- THE HEARTBEAT ---
-            if time.time() - last_heartbeat > 10:
-                print(f"💓 Heartbeat: Looking for slot {last_slot + 1}...", flush=True)
-                last_heartbeat = time.time()
-
-            # The Watchdog (V11.5)
-            lag = int(time.time() - last_scan_time)
-            if lag > 600 and blocks_scanned > 0:
-                print(f"💀 CRITICAL HANG ({lag}s). Forcing Reboot...", flush=True)
-                os._exit(1)
-
-            # Tip Check
             try:
                 current_tip = primary_client.get_slot().value
             except:
-                if fallback_client:
-                    current_tip = fallback_client.get_slot().value
+                if fallback_client: current_tip = fallback_client.get_slot().value
                 else: continue
 
-            # Rescue Jump
-            if (current_tip - last_slot) > 15: 
-                print(f"⚠️ Overdrive Jump: Lagging {current_tip - last_slot} slots. Warping...", flush=True)
-                last_slot = current_tip - 1
+            # Stability Warp for Railway
+            if (current_tip - last_slot) > 100: 
+                print(f"⚠️ Stability Warp: Resetting to Tip - 30...", flush=True)
+                last_slot = current_tip - 31
                 continue
 
-            if current_tip <= last_slot:
-                time.sleep(0.3); continue
+            # Heavy Buffer for Chainstack Free Nodes
+            if current_tip <= (last_slot + 25):
+                time.sleep(1); continue 
             
             target_slot = last_slot + 1
             block = None
 
-            # Fetch logic with 429 Detection
-            try:
-                block_res = primary_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
-                block = block_res.value
-            except Exception as e:
-                if "429" in str(e):
-                    print("🚫 RPC Rate Limited (429). Sleeping 2s...", flush=True)
-                    time.sleep(2)
-                if fallback_client:
-                    try:
-                        block_res = fallback_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
-                        block = block_res.value
-                    except: pass
+            # --- PERSISTENT RETRY LOGIC ---
+            for attempt in range(3):
+                try:
+                    block_res = primary_client.get_block(
+                        target_slot, 
+                        encoding="jsonParsed", 
+                        max_supported_transaction_version=0, 
+                        rewards=False
+                    )
+                    block = block_res.value
+                    if block: break 
+                except Exception as e:
+                    if "429" in str(e):
+                        print(f"🚫 Rate Limited. Sleeping 5s...", flush=True)
+                        time.sleep(5)
+                    else:
+                        time.sleep(2) 
 
             if block and block.transactions:
                 last_scan_time = time.time() 
@@ -220,12 +214,12 @@ def main():
                     diff = abs(tx.meta.pre_balances[0] - tx.meta.post_balances[0]) / 10**9
                     if diff >= WHALE_THRESHOLD:
                         process_whale_move(tx, diff)
-                    del tx
                 
-                if blocks_scanned % 5 == 0: 
-                    print(f"🧱 Block {target_slot} Scanned. Total: {blocks_scanned}", flush=True)
-            
-            last_slot += 1
+                print(f"🧱 Block {target_slot} Scanned. Total: {blocks_scanned} | Lag: {int(time.time()-last_scan_time)}s", flush=True)
+                last_slot += 1 
+            else:
+                print(f"⏩ Slot {target_slot} empty/skipped. Moving on...", flush=True)
+                last_slot += 1
             
         except Exception as e:
             print(f"🚨 Engine Error: {e}", flush=True)
