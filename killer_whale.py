@@ -9,13 +9,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- 1. GLOBAL SETTINGS ---
-WHALE_THRESHOLD = 1000  # Set to 1000 for launch (or 0.1 for testing)
+WHALE_THRESHOLD = 1000  # Set to 1000 for launch
 LOUD_THRESHOLD = 2500
 ALPHA_WATCH_THRESHOLD = 500 
 
 # RPC Endpoints
 ALCHEMY_URL = os.environ.get("ALCHEMY_URL")
-# High-performance public fallback
 FALLBACK_RPC_URL = os.environ.get("FALLBACK_RPC_URL") or "https://api.mainnet-beta.solana.com"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -46,7 +45,7 @@ KNOWN_WALLETS = {
 
 # --- 3. STATE INITIALIZATION ---
 primary_client = Client(ALCHEMY_URL, timeout=30, commitment="confirmed")
-fallback_client = Client(FALLBACK_RPC_URL, timeout=30, commitment="confirmed")
+data_client = Client(FALLBACK_RPC_URL, timeout=30)
 db = SyncPostgrestClient(f"{SUPABASE_URL}/rest/v1", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
 
 last_scan_time = time.time()
@@ -95,6 +94,7 @@ def process_whale_move(tx, diff):
         usd_val = diff * sol_price
 
         alpha_text = ""
+        # ALPHA DETECTION: Check token balances
         if diff >= ALPHA_WATCH_THRESHOLD and hasattr(tx.meta, 'post_token_balances'):
             pre_map = {str(b.mint): (b.ui_token_amount.ui_amount or 0) for b in tx.meta.pre_token_balances} if hasattr(tx.meta, 'pre_token_balances') else {}
             for post in tx.meta.post_token_balances:
@@ -114,20 +114,16 @@ def process_whale_move(tx, diff):
             f"💰 <b>{diff:,.0f} $SOL (~${usd_val:,.0f})</b>\n\n"
             f"📤 <b>From:</b> {s_label}\n"
             f"📥 <b>To:</b> {r_label}\n\n"
-            f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a> | "
-            f"<a href='https://birdeye.so/token/{sender}?chain=solana'>Birdeye</a> | "
-            f"<a href='https://arkhamintelligence.com/explorer/address/{sender}'>Arkham</a> | "
-            f"<a href='https://bubblemaps.io/solana/token/{sender}'>BubbleMaps</a>"
+            f"🔗 <a href='https://solscan.io/tx/{sig}'>Solscan</a>"
         )
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                       json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": False}, timeout=8)
     except Exception as e:
         print(f"❌ Alert Error: {e}", flush=True)
 
-# --- 6. COMMANDS ---
+# --- 6. COMMANDS (KEEP AS IS) ---
 def handle_commands_loop():
     global last_update_id, last_scan_time, blocks_scanned
-    print("👂 Command Listener Active", flush=True)
     while True:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
@@ -137,94 +133,70 @@ def handle_commands_loop():
                 m = update.get("message", {})
                 if m.get("text") == "/health" and m.get("from", {}).get("id") == ADMIN_USER_ID:
                     lag = int(time.time() - last_scan_time)
-                    status = "Railway V12.0 (Stubborn Engine)"
                     requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                                  json={"chat_id": ADMIN_USER_ID, "text": f"🛡️ WhaleMatrix: {status}\n🧱 Blocks: {blocks_scanned}\n⏳ Lag: {lag}s"})
+                                  json={"chat_id": ADMIN_USER_ID, "text": f"🛡️ WhaleMatrix V12.5 (Intelligent Sync)\n🧱 Blocks: {blocks_scanned}\n⏳ Lag: {lag}s"})
         except: time.sleep(5)
 
-# --- 7. MAIN ENGINE (STUBBORN RECOVERY) ---
+# --- 7. MAIN ENGINE (STABILIZED RANGE-SYNC) ---
 def main():
     global last_scan_time, blocks_scanned
-    print("🚀 WhaleMatrix V12.0 STUBBORN ENGINE ONLINE", flush=True)
+    print("🚀 WhaleMatrix V12.5 INTELLIGENT SYNC ONLINE", flush=True)
 
-    # Startup Notification
-    try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                      json={"chat_id": TELEGRAM_CHAT_ID, "text": "✅ WhaleMatrix Launching... Stubborn Persistence Active."}, timeout=8)
-    except: pass
-    
-    try:
-        current_tip = primary_client.get_slot().value
-        # Start exactly 50 blocks back for maximum indexing stability
-        last_slot = current_tip - 50 
-        last_scan_time = time.time()
-        print(f"🔗 Syncing from: {last_slot}", flush=True)
-    except Exception as e:
-        print(f"🚨 Connection Failed: {e}")
-        return
+    # Initialize at a safe distance (Tip - 100)
+    current_tip = primary_client.get_slot().value
+    last_processed_slot = current_tip - 100 
 
     threading.Thread(target=handle_commands_loop, daemon=True).start()
 
     while True:
         try:
-            if blocks_scanned > 0 and blocks_scanned % 15 == 0: gc.collect()
+            current_tip = primary_client.get_slot().value
+            
+            # Keep a 40-block safety buffer
+            if current_tip <= (last_processed_slot + 40):
+                time.sleep(2); continue
+
+            # --- THE INTELLIGENT RANGE-FETCH ---
+            start_range = last_processed_slot + 1
+            end_range = current_tip - 35 # Scan slightly older blocks for stability
             
             try:
-                current_tip = primary_client.get_slot().value
-            except:
-                current_tip = fallback_client.get_slot().value
+                # get_blocks returns ONLY the slots that produced a block
+                valid_slots = primary_client.get_blocks(start_range, end_range).value
+            except Exception as e:
+                print(f"🔄 Range Fetch failed: {e}", flush=True)
+                time.sleep(2); continue
 
-            # Anti-Warp Cushion
-            if (current_tip - last_slot) > 150: 
-                print(f"⚠️ Stability Warp: Resetting to Tip-50...", flush=True)
-                last_slot = current_tip - 51
+            if not valid_slots:
+                last_processed_slot = end_range
                 continue
 
-            # Safety Buffer (Wait for RPC indexing)
-            if current_tip <= (last_slot + 40):
-                time.sleep(1.5); continue 
-            
-            target_slot = last_slot + 1
-            block = None
-
-            # --- STUBBORN TRIPLE-FETCH ---
-            # Instead of skipping, we wait and retry the same block across both RPCs.
-            for attempt in range(5):
-                try:
-                    res = primary_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
-                    block = res.value
-                    if block: break
-                except: pass
-                
-                if not block:
+            for slot in valid_slots:
+                block = None
+                # Persistent retry for the confirmed block content
+                for attempt in range(3):
                     try:
-                        res = fallback_client.get_block(target_slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
+                        res = primary_client.get_block(slot, encoding="jsonParsed", max_supported_transaction_version=0, rewards=False)
                         block = res.value
                         if block: break
-                    except: pass
-                
-                if not block:
-                    print(f"⏳ Slot {target_slot} indexing... Retry {attempt+1}/5", flush=True)
-                    time.sleep(2) # Give the node time to find the block
+                    except: time.sleep(1)
 
-            if block and block.transactions:
-                last_scan_time = time.time() 
-                blocks_scanned += 1
-                for tx in block.transactions:
-                    if not tx.meta or tx.meta.err: continue
-                    diff = abs(tx.meta.pre_balances[0] - tx.meta.post_balances[0]) / 10**9
-                    if diff >= WHALE_THRESHOLD:
-                        process_whale_move(tx, diff)
+                if block and block.transactions:
+                    last_scan_time = time.time()
+                    blocks_scanned += 1
+                    for tx in block.transactions:
+                        if not tx.meta or tx.meta.err: continue
+                        diff = abs(tx.meta.pre_balances[0] - tx.meta.post_balances[0]) / 10**9
+                        if diff >= WHALE_THRESHOLD:
+                            process_whale_move(tx, diff)
+                    
+                    print(f"🧱 Block {slot} Scanned! | Total: {blocks_scanned} | Lag: {int(time.time()-last_scan_time)}s", flush=True)
                 
-                print(f"🧱 Block {target_slot} Scanned. Total: {blocks_scanned} | Lag: {int(time.time()-last_scan_time)}s", flush=True)
-                last_slot += 1 
-            else:
-                print(f"⏩ Slot {target_slot} empty or skipped after 5 retries.", flush=True)
-                last_slot += 1
-            
+                last_processed_slot = slot
+
         except Exception as e:
             print(f"🚨 Engine Error: {e}", flush=True)
-            time.sleep(1)
+            time.sleep(2)
 
 if __name__ == "__main__":
     main()
